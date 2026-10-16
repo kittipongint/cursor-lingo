@@ -1,0 +1,40 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./macos/build.sh
+      - run: cd build && ditto -c -k --keepParent CursorLingo.app CursorLingo-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: CursorLingo-macOS, path: build/CursorLingo-macOS.zip }
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S windows -B build/windows -A x64
+      - run: cmake --build build/windows --config Release
+      - run: Compress-Archive -Path build/windows/Release/CursorLingo.exe -DestinationPath build/CursorLingo-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: CursorLingo-Windows, path: build/CursorLingo-Windows-x64.zip }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with: { files: dist/* }
