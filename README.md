@@ -39,7 +39,7 @@ The Windows tray icon itself shows the current language code. The badge also hid
 
 ### macOS (12 Monterey or later, Apple Silicon and Intel)
 
-Download `CursorLingo-macOS.zip` from [Releases](../../releases), unzip it, and move **CursorLingo.app** to Applications.
+Download `CursorLingo-macOS.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, and move **CursorLingo.app** to Applications.
 The app is ad-hoc signed, not notarized. The first time you open it, right-click the app → **Open**, or run:
 
 ```bash
@@ -49,14 +49,14 @@ xattr -dr com.apple.quarantine /Applications/CursorLingo.app
 **Or build from source** (needs the Xcode Command Line Tools):
 
 ```bash
-git clone https://github.com/<you>/CursorLingo.git && cd CursorLingo && ./install.sh
+git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo && ./install.sh
 ```
 
 No Accessibility or Input Monitoring permission is needed.
 
 ### Windows 10 / 11 (x64)
 
-Download `CursorLingo-Windows-x64.zip` from [Releases](../../releases), unzip it, and run `CursorLingo.exe`.
+Download `CursorLingo-Windows-x64.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, and run `CursorLingo.exe`.
 Right-click the tray icon → **Start with Windows** to launch it automatically.
 SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
 
