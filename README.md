@@ -64,6 +64,8 @@ If your keychain has a *Developer ID Application* certificate, `install.sh` sign
 4. **Quit CursorLingo and open it again.** The app reads these permissions when it starts.
 5. The line under Auto-fix should now say **Active**. Test it: on the English layout type `l;ylfu` and press Space; it becomes **สวัสดี**.
 
+   <img src="assets/menu-autofix.png" width="410" alt="CursorLingo menu with Auto-fix checked and the status line 'Active · double-tap Shift: convert word / selection, or undo'">
+
 You only do this once: updates keep the permissions.
 
 **Upgrading from v1.1.3 or older?** Those builds were only ad-hoc signed, so macOS treats v1.1.4 as a new app. Grant the permissions one last time: in both **Input Monitoring** and **Accessibility**, select the old CursorLingo, click **−**, add the new one with **+**, and reopen the app. If it still says *Needs … permission*, clear the old entries and let macOS ask again:
@@ -108,6 +110,17 @@ x86_64-w64-mingw32-g++ -std=c++17 -Os -municode -mwindows -static windows/Cursor
 ```
 
 ## Auto-fix wrong language
+
+<p align="center">
+  <img src="assets/autofix-demo.gif" width="720" alt="Auto-fix demo: l;ylfu typed on the English layout becomes สวัสดีครับ; ะ้รห typed on the Thai layout becomes This; muj plus double Shift becomes ที่; a selected wrong-layout line plus double Shift becomes This is a new model">
+</p>
+
+<p align="center"><sub>
+  ① Thai typed on the English layout → fixed while typing &nbsp;·&nbsp;
+  ② English typed on the Thai layout → fixed at Space &nbsp;·&nbsp;
+  ③ <code>muj</code> + double Shift → ที่ &nbsp;·&nbsp;
+  ④ select a line + double Shift → converted
+</sub></p>
 
 Turn on **Auto-fix wrong language (EN ⇄ TH)** from the menu. When you finish a word with Space, and it looks like gibberish in the current layout but like a real word in the other one, CursorLingo erases it, types it again from the same keys, and switches the layout so you can keep going. Long Thai runs typed without spaces are fixed after a few characters.
 
