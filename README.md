@@ -87,7 +87,8 @@ Turn on **Auto-fix wrong language (EN ⇄ TH)** from the menu. When you finish a
 
 - Right after an automatic fix, double Shift puts the word back the way you typed it, switches the layout back, and leaves that word alone for the rest of the session.
 - On any other word (the one you're typing, or the last one), double Shift converts it to the other layout. Words that are also real words in the other language, such as `ที่` = `muj` or `ทำไม` = `mew`, are never fixed automatically, so this is the quick way to fix them.
-- It works on the current or last word only, and only if you haven't clicked, used a shortcut or switched apps since. It doesn't add entries to the app's undo history. Note that JetBrains IDEs also use double Shift (Search Everywhere).
+- **Select text and double-tap Shift** to convert the whole selection (several words or lines). Each character is read back through the other layout; the direction follows the script that dominates (mostly Thai → English, otherwise English → Thai), and anything that isn't on the keyboard (spaces, new lines, emoji) is kept. On macOS the selection is read through Accessibility; apps that don't expose it, and all Windows apps, use a quick copy/paste, after which your clipboard is restored. Terminals are skipped.
+- Without a selection it works on the current or last word only, and only if you haven't clicked, used a shortcut or switched apps since. It doesn't add entries to the app's undo history. Note that JetBrains IDEs also use double Shift (Search Everywhere).
 
 **How it decides.** A key press is a *physical key*, and every physical key produces one character in each layout. A word typed in the wrong layout is therefore the right text seen through the wrong key map. For each word, CursorLingo computes both readings and converts only when:
 
@@ -112,7 +113,7 @@ Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
 - see the current input language,
 - hide the badge for the current language, or show it for all languages again,
 - choose **Show**, **Style** and **Size**,
-- toggle **Auto-fix wrong language** (double-tap Shift to convert or undo the last word),
+- toggle **Auto-fix wrong language** (double-tap Shift to convert the last word or the selection, or to undo a fix),
 - toggle **Launch at Login** / **Start with Windows**,
 - quit.
 

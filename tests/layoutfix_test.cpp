@@ -73,6 +73,20 @@ int main() {
     expect("code", u"std::vector", LANG_EN, false);
     expect("mid-word Thai prefix is left alone", u"สวัสดี", LANG_TH, false, false);
 
+    // Selections are converted character by character, keeping what is not on the keyboard.
+    {
+        const char16_t* in = u"ะ้รห รห ฟ ืำไ ทนกำส\nl;ylfu 🙂";
+        int n = (int)std::u16string(in).size();
+        std::u16string a(n, 0), b(n, 0);
+        int to = convertText(in, n, &a[0]);
+        if (to != LANG_EN || a.substr(0, 19) != u"this is a new model") { printf("FAIL: selection TH->EN\n"); failures++; }
+        // Mixed text follows the dominant script: here it is now mostly Latin, so it goes back to Thai.
+        int back = convertText(a.c_str(), n, &b[0]);
+        if (back != LANG_TH || b.substr(0, 19) != std::u16string(in).substr(0, 19)) { printf("FAIL: selection round trip\n"); failures++; }
+        char16_t z[4];
+        if (convertText(u"123", 3, z) != -1) { printf("FAIL: digits only\n"); failures++; }
+    }
+
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("all layoutfix tests passed\n");
     return 0;

@@ -75,6 +75,38 @@ inline int render(const uint8_t* keys, int n, Lang lang, char16_t* out) {
     return n;
 }
 
+// Key that produces `c` in `lang` (with kShiftBit when shifted), or -1.
+inline int keyFor(char16_t c, Lang lang) {
+    if (c == 0) return -1;
+    for (int i = 0; i < kKeyCount; i++) {
+        if (charFor((uint8_t)i, lang) == c) return i;
+        if (charFor((uint8_t)(i | kShiftBit), lang) == c) return i | kShiftBit;
+    }
+    return -1;
+}
+
+// Re-reads arbitrary text (a selection) through the other layout, character by character: each character is
+// mapped back to the key that typed it and forward to that key's character in the other layout. Characters not
+// on the keyboard (spaces, new lines, emoji, ...) are kept. The direction follows the script that dominates:
+// mostly Thai -> English, otherwise English -> Thai. Writes n units to `out`; returns the target layout, or -1
+// when nothing would change.
+inline int convertText(const char16_t* in, int n, char16_t* out) {
+    int thai = 0, latin = 0;
+    for (int i = 0; i < n; i++) {
+        if (in[i] >= 0x0E01 && in[i] <= 0x0E5B) thai++;
+        else if ((in[i] >= 'a' && in[i] <= 'z') || (in[i] >= 'A' && in[i] <= 'Z')) latin++;
+    }
+    if (thai == 0 && latin == 0) return -1;
+    const Lang from = thai > latin ? LANG_TH : LANG_EN, to = from == LANG_TH ? LANG_EN : LANG_TH;
+    bool changed = false;
+    for (int i = 0; i < n; i++) {
+        int k = keyFor(in[i], from);
+        out[i] = k < 0 ? in[i] : charFor((uint8_t)k, to);
+        changed |= out[i] != in[i];
+    }
+    return changed ? (int)to : -1;
+}
+
 // ---------------------------------------------------------------------------------------------
 // English
 // ---------------------------------------------------------------------------------------------

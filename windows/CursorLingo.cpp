@@ -334,7 +334,8 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 #define WM_APP_MOVE (WM_APP + 1)
 #define WM_APP_TRAY (WM_APP + 2)
 #define WM_APP_FIX (WM_APP + 3)
-enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3 };
+#define WM_APP_SELECTION (WM_APP + 4)
+enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5 };
 enum {
     ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_AUTOFIX, ID_QUIT,
     ID_STYLE_BASE = 200, ID_MODE_BASE = 300, ID_SIZE_BASE = 400,
@@ -494,6 +495,7 @@ static void Refresh(bool switched) {
 //
 // Double-tapping Shift converts the word being typed, or else the last word, by hand. Flipping a word back
 // to the layout it was typed in undoes a fix, and that word is left alone for the rest of the session.
+// With no word to work on, it converts the selected text instead (read with Ctrl+C; the clipboard is put back).
 
 static FixWord g_jobs[4];  // hand-off to the message loop: what is on screen, to be flipped
 static int g_jobHead = 0, g_jobTail = 0;
@@ -547,7 +549,8 @@ static void QueueFlip(FixWord& w) {
 
 static void ToggleWord() {
     FixWord* w = g_word.n ? &g_word : (g_last.n ? &g_last : nullptr);
-    if (!w || g_fixLang < 0) return;
+    if (!w) { PostMessageW(g_host, WM_APP_SELECTION, 0, 0); return; }  // nothing typed: convert the selection
+    if (g_fixLang < 0) return;
     QueueFlip(*w);
     if (w->shown == w->typed) Ignore(*w);
 }
@@ -672,6 +675,149 @@ static void ApplyFlips() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Converting a selection (double Shift with no word to work on)
+// ---------------------------------------------------------------------------
+//
+// Win32 has no common way to read another app's selection, so it is copied with Ctrl+C, converted by
+// core/layoutfix.h, and pasted back with Ctrl+V. The user's clipboard is saved first and restored after.
+
+static struct {
+    UINT format[32];
+    HGLOBAL data[32];
+    int count;
+    DWORD seq;
+    int tries;
+    bool saved;
+} g_clip;
+
+static void SendChord(WORD vk) {  // Ctrl+<vk>
+    INPUT in[4] = {};
+    for (int i = 0; i < 4; i++) in[i].type = INPUT_KEYBOARD;
+    in[0].ki.wVk = VK_CONTROL;
+    in[1].ki.wVk = vk;
+    in[2].ki.wVk = vk;
+    in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    in[3].ki.wVk = VK_CONTROL;
+    in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(4, in, sizeof(INPUT));
+}
+
+static bool OpenClipboardRetry() {
+    for (int i = 0; i < 10; i++) {
+        if (OpenClipboard(g_host)) return true;
+        Sleep(10);
+    }
+    return false;
+}
+
+static void FreeSavedClipboard() {
+    for (int i = 0; i < g_clip.count; i++) GlobalFree(g_clip.data[i]);
+    g_clip.count = 0;
+    g_clip.saved = false;
+}
+
+// Copies every memory-based clipboard format (text, HTML, files, images as DIB, ...).
+static void SaveClipboard() {
+    FreeSavedClipboard();
+    if (!OpenClipboardRetry()) return;
+    for (UINT f = EnumClipboardFormats(0); f && g_clip.count < 32; f = EnumClipboardFormats(f)) {
+        if (f == CF_BITMAP || f == CF_PALETTE || f == CF_METAFILEPICT || f == CF_ENHMETAFILE || f == CF_OWNERDISPLAY ||
+            f == CF_DSPBITMAP || f == CF_DSPMETAFILEPICT || f == CF_DSPENHMETAFILE)
+            continue;  // GDI handles, synthesized from the formats we do keep
+        HANDLE h = GetClipboardData(f);
+        SIZE_T size = h ? GlobalSize(h) : 0;
+        if (!size || size > (16u << 20)) continue;
+        void* src = GlobalLock(h);
+        HGLOBAL copy = src ? GlobalAlloc(GMEM_MOVEABLE, size) : nullptr;
+        if (copy) {
+            memcpy(GlobalLock(copy), src, size);
+            GlobalUnlock(copy);
+            g_clip.format[g_clip.count] = f;
+            g_clip.data[g_clip.count++] = copy;
+        }
+        if (src) GlobalUnlock(h);
+    }
+    CloseClipboard();
+    g_clip.saved = true;
+}
+
+static void RestoreClipboard() {
+    if (!g_clip.saved || !OpenClipboardRetry()) return;
+    EmptyClipboard();
+    for (int i = 0; i < g_clip.count; i++) SetClipboardData(g_clip.format[i], g_clip.data[i]);  // ownership passes on
+    CloseClipboard();
+    g_clip.count = 0;
+    g_clip.saved = false;
+}
+
+static void BeginSelectionCopy() {
+    if (ForegroundIsTerminal() || g_clip.saved) return;  // Ctrl+C is "interrupt" there; or a copy is in flight
+    SaveClipboard();
+    g_clip.seq = GetClipboardSequenceNumber();
+    g_clip.tries = 0;
+    SendChord('C');
+    SetTimer(g_host, TIMER_COPY, 40, nullptr);
+}
+
+// Polled until the copy lands (or gives up when nothing was selected).
+static void CheckSelectionCopy() {
+    if (GetClipboardSequenceNumber() == g_clip.seq) {
+        if (++g_clip.tries < 8) return;
+        KillTimer(g_host, TIMER_COPY);
+        FreeSavedClipboard();  // nothing selected: the clipboard was never touched
+        return;
+    }
+    KillTimer(g_host, TIMER_COPY);
+
+    static char16_t in[2001], out[2001];
+    int n = 0;
+    if (OpenClipboardRetry()) {
+        if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+            if (const char16_t* p = (const char16_t*)GlobalLock(h)) {
+                while (p[n] && n < 2001) { in[n] = p[n]; n++; }
+                GlobalUnlock(h);
+            }
+        }
+        CloseClipboard();
+    }
+    // Too long, or an editor that copies the whole line ("...\r\n") when nothing is selected: leave it.
+    int target = (n == 0 || n > 2000 || in[n - 1] == u'\n') ? -1 : lf::convertText(in, n, out);
+    if (target < 0) { RestoreClipboard(); return; }
+
+    if (HKL hkl = FindLayout(target)) {
+        HWND fg = GetForegroundWindow();
+        if (fg) PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
+    }
+    if (OpenClipboardRetry()) {
+        EmptyClipboard();
+        if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (n + 1) * sizeof(char16_t))) {
+            char16_t* d = (char16_t*)GlobalLock(g);
+            memcpy(d, out, n * sizeof(char16_t));
+            d[n] = 0;
+            GlobalUnlock(g);
+            SetClipboardData(CF_UNICODETEXT, g);
+        }
+        CloseClipboard();
+    }
+    SendChord('V');
+    SetTimer(g_host, TIMER_RESTORE, 300, nullptr);  // after the app has read it
+
+    // The pasted text is now "the last word" if it is one, so double Shift flips it straight back.
+    FixWord w = {};
+    w.shown = target;
+    w.typed = 1 - target;
+    w.decided = true;
+    for (int i = 0; i < n && w.n >= 0; i++) {
+        int k = lf::keyFor(out[i], (lf::Lang)target);
+        if (k < 0 || i >= lf::kMaxWord) w.n = -1;
+        else w.keys[w.n++] = (uint8_t)k;
+    }
+    g_word.n = 0;
+    g_last = w.n > 0 ? w : FixWord{};
+    if (g_fixLang != target) g_expectLang = target;
+}
+
 static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) ResetWords();  // caret moved
     if (code == HC_ACTION && wp == WM_MOUSEMOVE && g_visible) {
@@ -721,7 +867,7 @@ static void ShowMenu() {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, L"Style");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)size, L"Size");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_set.autoFix ? MF_CHECKED : 0), ID_AUTOFIX, L"Auto-fix wrong language (EN \u21C4 TH)  \u00B7  Shift Shift: convert / undo");
+    AppendMenuW(m, MF_STRING | (g_set.autoFix ? MF_CHECKED : 0), ID_AUTOFIX, L"Auto-fix wrong language (EN \u21C4 TH)  \u00B7  Shift Shift: convert word / selection");
     AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, L"Start with Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit CursorLingo");
@@ -790,6 +936,13 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_APP_FIX:
             ApplyFlips();
+            return 0;
+        case WM_APP_SELECTION:
+            BeginSelectionCopy();
+            return 0;
+        case WM_TIMER:
+            if (wp == TIMER_COPY) CheckSelectionCopy();
+            if (wp == TIMER_RESTORE) { KillTimer(h, TIMER_RESTORE); RestoreClipboard(); }
             return 0;
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:

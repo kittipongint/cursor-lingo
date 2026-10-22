@@ -193,6 +193,7 @@ final class BadgeView: NSView {
 /// Watches typing (listen-only event tap) and, at the end of a word, re-types it in the other layout when the
 /// detector in core/layoutfix.h says it was typed with the wrong one. Double-tapping Shift converts the current or
 /// last word by hand, and undoes an automatic fix (that word is then left alone for the rest of the session).
+/// With no word to work on, double Shift converts the selected text instead.
 /// Only the current and the last word are kept, in memory; nothing is logged or stored, and nothing is observed
 /// while secure input (password fields) is on.
 final class AutoFix {
@@ -239,7 +240,7 @@ final class AutoFix {
         if tap == nil { return "Not running yet: relaunch CursorLingo" }
         if IsSecureEventInputEnabled() { return "Paused: secure input (a password field) is on" }
         if InputSource.fixLanguage() == nil { return "Paused: this layout isn't supported" }
-        return "Active · double-tap Shift to convert or undo"
+        return "Active · double-tap Shift: convert word / selection, or undo"
     }
 
     @discardableResult
@@ -373,6 +374,92 @@ final class AutoFix {
             convert(&w)
             if w.shown == w.typed { ignore(w.keys) }
             last = w
+        } else {
+            convertSelection()
+        }
+    }
+
+    // MARK: Selection
+
+    private enum Selection { case text(String), none, unknown }
+
+    /// Asks the focused text field for its selection through Accessibility (no clipboard involved).
+    private static func accessibilitySelection() -> Selection {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.25)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return .unknown }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focused as! AXUIElement, kAXSelectedTextAttribute as CFString, &value) == .success
+        else { return .unknown }
+        guard let text = value as? String, !text.isEmpty else { return .none }
+        return .text(text)
+    }
+
+    private func convertSelection() {
+        guard !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "") else { return }
+        switch AutoFix.accessibilitySelection() {
+        case .text(let text): replaceSelection(text)
+        case .none: return
+        case .unknown:  // the app doesn't expose its selection: copy it, then put the clipboard back
+            withClipboardSaved { restore in
+                let pb = NSPasteboard.general
+                let before = pb.changeCount
+                self.post(keyCode: 8, flags: .maskCommand)  // ⌘C
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    let text = pb.changeCount != before ? pb.string(forType: .string) : nil
+                    restore()
+                    // Editors copy the whole line ("...\n") when nothing is selected: never act on that.
+                    if let text, !text.hasSuffix("\n") { self.replaceSelection(text) }
+                }
+            }
+        }
+    }
+
+    /// Types (or, for several lines, pastes) the other layout's reading of `text` over the selection.
+    private func replaceSelection(_ text: String) {
+        let units = Array(text.utf16)
+        guard !units.isEmpty, units.count <= 2000 else { return }
+        var out = [UInt16](repeating: 0, count: units.count)
+        let target = Int(lf_convert_text(units, Int32(units.count), &out))
+        guard target >= 0 else { return }
+        if language != target { expectedLanguage = target }
+        InputSource.select(target)
+
+        if out.contains(0x0A) || out.contains(0x0D) {
+            // Typing a new line could press Return (and send a chat message): paste instead.
+            withClipboardSaved { restore in
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(String(utf16CodeUnits: out, count: out.count), forType: .string)
+                self.post(keyCode: 9, flags: .maskCommand)  // ⌘V
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { restore() }
+            }
+        } else {
+            for unit in out { post(keyCode: 0, unicode: unit) }  // the first character replaces the selection
+        }
+        // The converted text is now "the last word" if it is one, so double Shift flips it straight back.
+        let keys = out.map { lf_key_for_char($0, Int32(target)) }
+        if !keys.contains(-1) {
+            last = Word(keys: keys.map { UInt8($0) }, shown: target, typed: 1 - target, trailing: 0, decided: true)
+        }
+    }
+
+    /// Runs `body` with a snapshot of the clipboard; `body` calls the closure it gets to put the snapshot back.
+    private func withClipboardSaved(_ body: (@escaping () -> Void) -> Void) {
+        let pb = NSPasteboard.general
+        let saved = (pb.pasteboardItems ?? []).map { item in
+            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+        }
+        body {
+            pb.clearContents()
+            let items = saved.map { pairs -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in pairs { item.setData(data, forType: type) }
+                return item
+            }
+            if !items.isEmpty { pb.writeObjects(items) }
         }
     }
 
@@ -404,11 +491,11 @@ final class AutoFix {
         }
     }
 
-    private func post(keyCode: CGKeyCode, unicode: UInt16? = nil) {
+    private func post(keyCode: CGKeyCode, unicode: UInt16? = nil, flags: CGEventFlags = []) {
         for down in [true, false] {
             guard let e = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: down) else { continue }
             e.setIntegerValueField(.eventSourceUserData, value: AutoFix.marker)
-            e.flags = []
+            e.flags = flags
             if var u = unicode { e.keyboardSetUnicodeString(stringLength: 1, unicodeString: &u) }
             e.post(tap: .cghidEventTap)
         }
