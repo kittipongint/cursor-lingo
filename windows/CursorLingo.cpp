@@ -5,8 +5,8 @@
 //   * Rendering happens only when the language, style, size or monitor DPI changes.
 //   * The badge is a per-pixel-alpha layered window, so it is anti-aliased and click-through.
 //   * The active layout is read with GetKeyboardLayout(). A keyboard hook exists only while the optional
-//     "Auto-fix wrong language" feature is switched on (off by default); it keeps nothing but the word
-//     being typed, in memory, and never touches the network or disk.
+//     "Auto-fix wrong language" feature is switched on (off by default); it keeps nothing but the current
+//     and last word, in memory, and never touches the network or disk.
 //   * Runs as a normal user: no administrator rights, no installer, no services. The registry is only
 //     touched under HKCU.
 
@@ -134,8 +134,18 @@ static void SetStartup(bool on) {
 
 static HKL g_lastHkl = nullptr;
 static wchar_t g_code[4] = L"??";
-static int g_fixLang = -1;  // layout the auto-fixer understands: 0 = US English, 1 = Thai (Kedmanee), -1 = other
-static int g_fixLen = 0;    // keys of the word being typed (see the auto-fix section)
+static int g_fixLang = -1;     // layout the auto-fixer understands: 0 = US English, 1 = Thai (Kedmanee), -1 = other
+static int g_expectLang = -1;  // a layout switch the auto-fixer made itself: it must not end the word
+
+// A word on screen (see the auto-fix section): its physical keys, the layout it is shown in, the layout it was
+// typed in, and how many spaces follow it. `decided` stops the detector from touching it again.
+struct FixWord {
+    uint8_t keys[lf::kMaxWord];
+    int n, shown, typed, trailing;
+    bool decided;
+};
+static FixWord g_word, g_last;  // being typed; finished with nothing but spaces after it (n == 0: none)
+static void ResetWords() { g_word.n = 0; g_last.n = 0; }
 
 // Only the stock layouts: remapped ones (Dvorak, Pattachote, ...) have a different key->letter table.
 static int FixLangOf(HKL hkl) {
@@ -165,7 +175,8 @@ static bool UpdateLanguage() {
     if (!hkl || hkl == g_lastHkl) return false;
     g_lastHkl = hkl;
     g_fixLang = FixLangOf(hkl);
-    g_fixLen = 0;  // a word never spans a layout change
+    if (g_expectLang >= 0 && g_fixLang == g_expectLang) g_expectLang = -1;  // our own switch
+    else if (!(g_word.n && g_word.shown == g_fixLang)) ResetWords();         // a word never spans the user's
 
     wchar_t name[LOCALE_NAME_MAX_LENGTH] = L"";
     wchar_t code[4] = L"??";
@@ -480,10 +491,16 @@ static void Refresh(bool switched) {
 // layout does not matter). At a space the word is judged by core/layoutfix.h; when it was typed in the
 // wrong layout, the word and the space are erased and typed again from the other layout's reading of
 // the same keys, and the layout is switched so typing continues correctly.
+//
+// Double-tapping Shift converts the word being typed, or else the last word, by hand. Flipping a word back
+// to the layout it was typed in undoes a fix, and that word is left alone for the rest of the session.
 
-static uint8_t g_fixKeys[lf::kMaxWord];
-static uint8_t g_fixWord[lf::kMaxWord];  // hand-off to the message loop
-static int g_fixWordLen = 0;
+static FixWord g_jobs[4];  // hand-off to the message loop: what is on screen, to be flipped
+static int g_jobHead = 0, g_jobTail = 0;
+static FixWord g_ignored[64];  // words whose fix the user undid (memory only)
+static int g_ignoredCount = 0;
+static bool g_shiftDown = false, g_shiftClean = false;
+static DWORD g_shiftDownAt = 0, g_lastShiftTap = 0;
 
 static bool FocusIsPassword() {
     HWND fg = GetForegroundWindow();
@@ -502,50 +519,104 @@ static bool ForegroundIsTerminal() {
            wcscmp(cls, L"mintty") == 0;
 }
 
-static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
-    if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)) {
-        const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)lp;
-        if (k->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);  // ours or another tool's
+static bool IsIgnored(const FixWord& w, bool prefix) {
+    for (int i = 0; i < g_ignoredCount; i++) {
+        const FixWord& g = g_ignored[i];
+        if ((prefix ? g.n >= w.n : g.n == w.n) && memcmp(g.keys, w.keys, w.n) == 0) return true;
+    }
+    return false;
+}
 
-        if (wp == WM_SYSKEYDOWN || (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000) ||
-            (GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000)) {
-            g_fixLen = 0;  // shortcut
-        } else if (k->vkCode == VK_BACK) {
-            if (g_fixLen > 0) g_fixLen--;
-        } else if (k->vkCode == VK_SPACE) {
-            int n = g_fixLen;
-            g_fixLen = 0;
-            if (n >= 2 && g_fixLang >= 0 && !ForegroundIsTerminal() &&
-                lf::shouldConvert(g_fixKeys, n, (lf::Lang)g_fixLang, true)) {
-                memcpy(g_fixWord, g_fixKeys, n);
-                g_fixWordLen = n;
-                PostMessageW(g_host, WM_APP_FIX, 1, 0);  // 1 = also re-type the space
-            }
+static void Ignore(const FixWord& w) {
+    if (IsIgnored(w, false)) return;
+    if (g_ignoredCount == 64) { memmove(g_ignored, g_ignored + 1, sizeof(FixWord) * 63); g_ignoredCount--; }
+    g_ignored[g_ignoredCount++] = w;
+}
+
+// Queues `w` (as it is on screen now) to be flipped to the other layout, and records the flip.
+static void QueueFlip(FixWord& w) {
+    int next = (g_jobTail + 1) % 4;
+    if (next == g_jobHead) return;  // the user is faster than the message loop: drop it
+    g_jobs[g_jobTail] = w;
+    g_jobTail = next;
+    w.shown = 1 - w.shown;
+    w.decided = true;
+    if (g_fixLang != w.shown) g_expectLang = w.shown;
+    PostMessageW(g_host, WM_APP_FIX, 0, 0);
+}
+
+static void ToggleWord() {
+    FixWord* w = g_word.n ? &g_word : (g_last.n ? &g_last : nullptr);
+    if (!w || g_fixLang < 0) return;
+    QueueFlip(*w);
+    if (w->shown == w->typed) Ignore(*w);
+}
+
+static void EndOfWord() {
+    FixWord w = g_word;
+    w.trailing = 1;
+    g_word.n = 0;
+    if (!w.decided && w.n >= 2 && w.shown >= 0 && !IsIgnored(w, false) && !ForegroundIsTerminal() &&
+        lf::shouldConvert(w.keys, w.n, (lf::Lang)w.shown, true))
+        QueueFlip(w);
+    g_last = w;
+}
+
+static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
+    if (code != HC_ACTION) return CallNextHookEx(nullptr, code, wp, lp);
+    const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)lp;
+    if (k->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);  // ours or another tool's
+    const bool down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
+
+    if (k->vkCode == VK_LSHIFT || k->vkCode == VK_RSHIFT || k->vkCode == VK_SHIFT) {
+        if (down) {
+            if (!g_shiftDown) { g_shiftDown = true; g_shiftClean = true; g_shiftDownAt = k->time; }  // not repeats
         } else {
-            int idx = (k->flags & LLKHF_EXTENDED) ? -1 : lf::keyIndexFrom(lf::kWinScan, (int)k->scanCode);
-            if (idx < 0 || g_fixLen >= lf::kMaxWord) {
-                g_fixLen = 0;
-            } else {
-                if (g_fixLen == 0) {
-                    g_fixLang = FixLangOf(CurrentHkl());  // fresh layout at the start of each word
-                    if (g_fixLang < 0 || FocusIsPassword()) return CallNextHookEx(nullptr, code, wp, lp);
-                }
-                g_fixKeys[g_fixLen++] = (uint8_t)(idx | ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ? lf::kShiftBit : 0));
-                // A long run without spaces (typical for Thai) is checked as it grows, so it is fixed early.
-                if (g_fixLang == 0 && g_fixLen >= 6 && lf::shouldConvert(g_fixKeys, g_fixLen, lf::LANG_EN, false)) {
-                    memcpy(g_fixWord, g_fixKeys, g_fixLen);
-                    g_fixWordLen = g_fixLen;
-                    g_fixLen = 0;
-                    PostMessageW(g_host, WM_APP_FIX, 0, 0);
-                }
+            g_shiftDown = false;
+            if (g_shiftClean && k->time - g_shiftDownAt < 350) {  // a tap, not a hold
+                if (g_lastShiftTap && k->time - g_lastShiftTap < 450) { g_lastShiftTap = 0; ToggleWord(); }
+                else g_lastShiftTap = k->time;
             }
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+    if (!down) return CallNextHookEx(nullptr, code, wp, lp);
+    g_shiftClean = false;
+    g_lastShiftTap = 0;
+
+    if (wp == WM_SYSKEYDOWN || (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000) ||
+        (GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000)) {
+        ResetWords();  // shortcut
+    } else if (k->vkCode == VK_BACK) {
+        if (g_word.n) g_word.n--;
+        else g_last.n = 0;
+    } else if (k->vkCode == VK_SPACE) {
+        if (g_word.n) EndOfWord();
+        else if (g_last.n && ++g_last.trailing > 8) g_last.n = 0;
+    } else {
+        int idx = (k->flags & LLKHF_EXTENDED) ? -1 : lf::keyIndexFrom(lf::kWinScan, (int)k->scanCode);
+        if (idx < 0 || g_word.n >= lf::kMaxWord) {
+            ResetWords();
+        } else {
+            if (g_word.n == 0) {
+                g_last.n = 0;
+                g_fixLang = FixLangOf(CurrentHkl());  // fresh layout at the start of each word
+                if (g_fixLang < 0 || FocusIsPassword()) return CallNextHookEx(nullptr, code, wp, lp);
+                g_word = FixWord{};
+                g_word.shown = g_word.typed = g_fixLang;
+            }
+            g_word.keys[g_word.n++] = (uint8_t)(idx | ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ? lf::kShiftBit : 0));
+            // A long run without spaces (typical for Thai) is checked as it grows, so it is fixed early.
+            if (!g_word.decided && g_word.shown == 0 && g_word.n >= 6 && !IsIgnored(g_word, true) &&
+                lf::shouldConvert(g_word.keys, g_word.n, lf::LANG_EN, false))
+                QueueFlip(g_word);
         }
     }
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
 static void SetAutoFix(bool on) {
-    g_fixLen = 0;
+    ResetWords();
     if (on && !g_kbHook) g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, g_inst, 0);
     if (!on && g_kbHook) { UnhookWindowsHookEx(g_kbHook); g_kbHook = nullptr; }
 }
@@ -560,15 +631,14 @@ static HKL FindLayout(int lang) {
 }
 
 // Runs from the message loop (never inside the hook): erase the word, type the other reading, switch layout.
-static void ApplyFix(bool trailingSpace) {
-    const int n = g_fixWordLen;
-    if (n <= 0 || g_fixLang < 0) return;
-    const int target = 1 - g_fixLang;
-    char16_t text[lf::kMaxWord + 2];
-    lf::render(g_fixWord, n, target ? lf::LANG_TH : lf::LANG_EN, text);
-    int len = n;
-    if (trailingSpace) text[len++] = u' ';
-    const int erase = n + (trailingSpace ? 1 : 0);
+static void ApplyFlip(const FixWord& w) {
+    if (w.n <= 0 || w.shown < 0) return;
+    const int target = 1 - w.shown;
+    char16_t text[lf::kMaxWord + 10];
+    lf::render(w.keys, w.n, target ? lf::LANG_TH : lf::LANG_EN, text);
+    int len = w.n;
+    for (int i = 0; i < w.trailing && len < lf::kMaxWord + 9; i++) text[len++] = u' ';
+    const int erase = len;
 
     // Switch first so keys typed in the meantime already land in the right layout.
     if (HKL hkl = FindLayout(target)) {
@@ -576,7 +646,7 @@ static void ApplyFix(bool trailingSpace) {
         if (fg) PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
     }
 
-    INPUT in[(lf::kMaxWord + 2) * 4] = {};
+    INPUT in[(lf::kMaxWord + 10) * 4] = {};
     int c = 0;
     for (int i = 0; i < erase; i++)
         for (int up = 0; up < 2; up++) {
@@ -593,11 +663,17 @@ static void ApplyFix(bool trailingSpace) {
             c++;
         }
     SendInput((UINT)c, in, sizeof(INPUT));
-    g_fixWordLen = 0;
+}
+
+static void ApplyFlips() {
+    while (g_jobHead != g_jobTail) {
+        ApplyFlip(g_jobs[g_jobHead]);
+        g_jobHead = (g_jobHead + 1) % 4;
+    }
 }
 
 static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
-    if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) g_fixLen = 0;  // caret moved
+    if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) ResetWords();  // caret moved
     if (code == HC_ACTION && wp == WM_MOUSEMOVE && g_visible) {
         g_pt = ((MSLLHOOKSTRUCT*)lp)->pt;
         // Coalesce: at most one pending move message, so fast mice never flood the queue.
@@ -608,7 +684,7 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
 
 static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
     g_fullscreen = ForegroundIsFullscreen();
-    g_fixLen = 0;
+    ResetWords();
     bool changed = UpdateLanguage();
     Refresh(changed);
     if (g_visible) SetWindowPos(g_badge, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -645,7 +721,7 @@ static void ShowMenu() {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, L"Style");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)size, L"Size");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_set.autoFix ? MF_CHECKED : 0), ID_AUTOFIX, L"Auto-fix wrong language (EN \u21C4 TH)");
+    AppendMenuW(m, MF_STRING | (g_set.autoFix ? MF_CHECKED : 0), ID_AUTOFIX, L"Auto-fix wrong language (EN \u21C4 TH)  \u00B7  Shift Shift: convert / undo");
     AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, L"Start with Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit CursorLingo");
@@ -713,7 +789,7 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (LOWORD(lp) == WM_CONTEXTMENU || LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT) ShowMenu();
             return 0;
         case WM_APP_FIX:
-            ApplyFix(wp != 0);
+            ApplyFlips();
             return 0;
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:

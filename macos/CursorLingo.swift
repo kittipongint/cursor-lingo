@@ -191,8 +191,10 @@ final class BadgeView: NSView {
 // MARK: - Auto-fix wrong language
 
 /// Watches typing (listen-only event tap) and, at the end of a word, re-types it in the other layout when the
-/// detector in core/layoutfix.h says it was typed with the wrong one. Only the current word is ever kept in
-/// memory; nothing is logged or stored, and nothing is observed while secure input (password fields) is on.
+/// detector in core/layoutfix.h says it was typed with the wrong one. Double-tapping Shift converts the current or
+/// last word by hand, and undoes an automatic fix (that word is then left alone for the rest of the session).
+/// Only the current and the last word are kept, in memory; nothing is logged or stored, and nothing is observed
+/// while secure input (password fields) is on.
 final class AutoFix {
     private static let marker: Int64 = 0x434C47  // tags our own synthetic events so we never react to them
     private static let terminals: Set<String> = [
@@ -200,10 +202,26 @@ final class AutoFix {
         "com.github.wez.wezterm", "net.kovidgoyal.kitty", "dev.warp.Warp-Stable", "co.zeit.hyper",
     ]
 
+    /// A word on screen: its physical keys, the layout it is shown in, the layout it was typed in, and how many
+    /// spaces follow it. `decided` stops the detector from touching it again (fixed or toggled already).
+    private struct Word {
+        var keys: [UInt8] = []
+        var shown = 0
+        var typed = 0
+        var trailing = 0
+        var decided = false
+    }
+
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var keys: [UInt8] = []
-    private var language: Int?          // layout currently on screen: 0 = EN, 1 = TH, nil = unsupported
+    private var word = Word()            // being typed
+    private var last: Word?              // finished, and nothing but spaces typed after it
+    private var ignored: [[UInt8]] = []  // words whose fix the user undid (this session only)
+    private var language: Int?           // layout currently on screen: 0 = EN, 1 = TH, nil = unsupported
+    private var expectedLanguage: Int?   // a layout switch we made ourselves: it must not end the word
+    private var shiftDownAt: TimeInterval = 0
+    private var shiftClean = false       // no other key since Shift went down
+    private var lastShiftTap: TimeInterval = 0
     private let source = CGEventSource(stateID: .privateState)
 
     var isRunning: Bool { tap != nil }
@@ -221,14 +239,14 @@ final class AutoFix {
         if tap == nil { return "Not running yet: relaunch CursorLingo" }
         if IsSecureEventInputEnabled() { return "Paused: secure input (a password field) is on" }
         if InputSource.fixLanguage() == nil { return "Paused: this layout isn't supported" }
-        return "Active"
+        return "Active · double-tap Shift to convert or undo"
     }
 
     @discardableResult
     func start() -> Bool {
         if tap != nil { return true }
         guard AutoFix.hasPermission else { return false }
-        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let types: [CGEventType] = [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             if let refcon { Unmanaged<AutoFix>.fromOpaque(refcon).takeUnretainedValue().handle(type, event) }
@@ -249,68 +267,135 @@ final class AutoFix {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         tap = nil
         runLoopSource = nil
-        keys.removeAll()
+        reset()
     }
 
-    /// Call whenever the input source or the frontmost app changes: a word never spans either.
+    /// The input source changed. A word never spans a switch the user made; ours are expected.
     func inputChanged() {
-        keys.removeAll()
-        language = InputSource.fixLanguage()
+        let now = InputSource.fixLanguage()
+        if let expected = expectedLanguage, now == expected {
+            expectedLanguage = nil
+            language = now
+            return
+        }
+        reset()
+        language = now
+    }
+
+    /// The caret may have moved (another app, a click, a shortcut): forget both words.
+    func reset() {
+        word = Word()
+        last = nil
+        lastShiftTap = 0
     }
 
     private func handle(_ type: CGEventType, _ event: CGEvent) {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            keys.removeAll()
+            reset()
             return
-        case .keyDown:
+        case .keyDown, .flagsChanged:
             break
         default:
-            keys.removeAll()  // a click moves the caret: the word is over
+            reset()  // a click moves the caret
             return
         }
         if event.getIntegerValueField(.eventSourceUserData) == AutoFix.marker { return }
-        guard let language, !IsSecureEventInputEnabled() else { keys.removeAll(); return }
-
-        let flags = event.flags
-        if !flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]) { keys.removeAll(); return }
-
+        guard let language, !IsSecureEventInputEnabled() else { reset(); return }
         let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        let flags = event.flags
+
+        if type == .flagsChanged {
+            guard code == 56 || code == 60 else { shiftClean = false; return }  // left / right Shift only
+            let now = ProcessInfo.processInfo.systemUptime
+            if flags.contains(.maskShift) {
+                shiftDownAt = now
+                shiftClean = true
+            } else if shiftClean, now - shiftDownAt < 0.35 {  // a tap, not a hold
+                if now - lastShiftTap < 0.45 {
+                    lastShiftTap = 0
+                    toggle()
+                } else {
+                    lastShiftTap = now
+                }
+            }
+            return
+        }
+
+        shiftClean = false
+        lastShiftTap = 0
+        if !flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]) { reset(); return }
+
         switch code {
-        case 51: if !keys.isEmpty { keys.removeLast() }; return    // delete
-        case 49: endOfWord(language: language); return              // space
+        case 51:  // delete
+            if word.keys.isEmpty { last = nil } else { word.keys.removeLast() }
+            return
+        case 49:  // space
+            if word.keys.isEmpty { last?.trailing += 1 } else { endOfWord() }
+            return
         default: break
         }
         let index = lf_key_from_mac_keycode(Int32(code))
-        guard index >= 0, keys.count < 48 else { keys.removeAll(); return }  // return, tab, arrows, ...
-        keys.append(UInt8(index) | (flags.contains(.maskShift) ? 0x80 : 0))
+        guard index >= 0, word.keys.count < 48 else { reset(); return }  // return, tab, arrows, ...
+        if word.keys.isEmpty {
+            last = nil
+            word = Word(shown: language, typed: language)
+        }
+        word.keys.append(UInt8(index) | (flags.contains(.maskShift) ? 0x80 : 0))
 
         // A long run with no spaces (typical for Thai) is checked as it grows, so it is fixed early.
-        if language == 0, keys.count >= 6, lf_should_convert(keys, Int32(keys.count), 0, false) {
-            fix(language: language, trailingSpace: false)
+        if !word.decided, word.shown == 0, word.keys.count >= 6, !isIgnored(word.keys, prefix: true),
+           lf_should_convert(word.keys, Int32(word.keys.count), 0, false) {
+            convert(&word)
         }
     }
 
-    private func endOfWord(language: Int) {
-        defer { keys.removeAll() }
-        guard keys.count >= 2, !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
-        else { return }
-        if lf_should_convert(keys, Int32(keys.count), Int32(language), true) {
-            fix(language: language, trailingSpace: true)
+    private func endOfWord() {
+        var w = word
+        w.trailing = 1
+        word = Word()
+        if !w.decided, w.keys.count >= 2, !isIgnored(w.keys, prefix: false),
+           !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""),
+           lf_should_convert(w.keys, Int32(w.keys.count), Int32(w.shown), true) {
+            convert(&w)
+        }
+        last = w
+    }
+
+    /// Double Shift: flip the word being typed, or else the last word. Flipping a word back to the layout it was
+    /// typed in means the user wants it as typed, so it is never auto-fixed again this session.
+    private func toggle() {
+        if !word.keys.isEmpty {
+            convert(&word)
+            if word.shown == word.typed { ignore(word.keys) }
+        } else if var w = last {
+            convert(&w)
+            if w.shown == w.typed { ignore(w.keys) }
+            last = w
         }
     }
 
-    /// Replaces the word on screen (plus the space that ended it) with the other layout's reading of the same keys.
-    private func fix(language: Int, trailingSpace: Bool) {
-        let word = keys
-        keys.removeAll()
-        let target = 1 - language
-        var buffer = [UInt16](repeating: 0, count: word.count + 1)
-        _ = lf_render(word, Int32(word.count), Int32(target), &buffer)
-        var text = Array(buffer.prefix(word.count))
-        if trailingSpace { text.append(0x20) }
-        let erase = word.count + (trailingSpace ? 1 : 0)
+    private func isIgnored(_ keys: [UInt8], prefix: Bool) -> Bool {
+        ignored.contains { prefix ? $0.starts(with: keys) : $0 == keys }
+    }
+
+    private func ignore(_ keys: [UInt8]) {
+        if !isIgnored(keys, prefix: false) { ignored.append(keys) }
+        if ignored.count > 200 { ignored.removeFirst() }
+    }
+
+    /// Replaces the word on screen (and the spaces after it) with the other layout's reading of the same keys,
+    /// and switches to that layout.
+    private func convert(_ w: inout Word) {
+        let target = 1 - w.shown
+        var buffer = [UInt16](repeating: 0, count: w.keys.count + 1)
+        _ = lf_render(w.keys, Int32(w.keys.count), Int32(target), &buffer)
+        let text = Array(buffer.prefix(w.keys.count)) + Array(repeating: UInt16(0x20), count: w.trailing)
+        let erase = w.keys.count + w.trailing
+        w.shown = target
+        w.decided = true
+        if language != target { expectedLanguage = target }
 
         DispatchQueue.main.async { [self] in
             InputSource.select(target)   // first, so keys typed meanwhile already land in the right layout
@@ -424,7 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func frontAppChanged() { autoFix.inputChanged() }
+    @objc private func frontAppChanged() { autoFix.reset() }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitors.forEach(NSEvent.removeMonitor)

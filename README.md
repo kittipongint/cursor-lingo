@@ -83,6 +83,12 @@ x86_64-w64-mingw32-g++ -std=c++17 -Os -municode -mwindows -static windows/Cursor
 
 Turn on **Auto-fix wrong language (EN ⇄ TH)** from the menu. When you finish a word with Space, and it looks like gibberish in the current layout but like a real word in the other one, CursorLingo erases it, types it again from the same keys, and switches the layout so you can keep going. Long Thai runs typed without spaces are fixed after a few characters.
 
+**Double-tap Shift** to convert by hand, or to undo:
+
+- Right after an automatic fix, double Shift puts the word back the way you typed it, switches the layout back, and leaves that word alone for the rest of the session.
+- On any other word (the one you're typing, or the last one), double Shift converts it to the other layout. Words that are also real words in the other language, such as `ที่` = `muj` or `ทำไม` = `mew`, are never fixed automatically, so this is the quick way to fix them.
+- It works on the current or last word only, and only if you haven't clicked, used a shortcut or switched apps since. It doesn't add entries to the app's undo history. Note that JetBrains IDEs also use double Shift (Search Everywhere).
+
 **How it decides.** A key press is a *physical key*, and every physical key produces one character in each layout. A word typed in the wrong layout is therefore the right text seen through the wrong key map. For each word, CursorLingo computes both readings and converts only when:
 
 1. the reading on screen is implausible for its language, and
@@ -94,7 +100,7 @@ On a sample of real English and Thai words, correct text was wrongly changed in 
 
 **Privacy and permissions.**
 - Off by default. The keyboard hook / event tap only exists while the option is on.
-- Only the current word is kept, in memory. Nothing is logged, stored or sent anywhere.
+- Only the current and the last word are kept, in memory, plus the words you undid this session. Nothing is logged, stored or sent anywhere.
 - macOS asks for **Input Monitoring** and **Accessibility**. Secure input (password fields) and Terminal apps are skipped.
 - Windows needs no special rights, but cannot see windows running as administrator. Classic password boxes and consoles are skipped.
 - Only the stock US-English and Thai (Kedmanee) layouts are supported; other layouts are left alone.
@@ -106,7 +112,7 @@ Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
 - see the current input language,
 - hide the badge for the current language, or show it for all languages again,
 - choose **Show**, **Style** and **Size**,
-- toggle **Auto-fix wrong language**,
+- toggle **Auto-fix wrong language** (double-tap Shift to convert or undo the last word),
 - toggle **Launch at Login** / **Start with Windows**,
 - quit.
 
