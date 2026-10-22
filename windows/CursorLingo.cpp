@@ -412,7 +412,7 @@ static void UpdateTrayIcon() {
     if (!icon) return;
 
     g_nid.hIcon = icon;
-    swprintf(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"CursorLingo — %ls", g_code);
+    swprintf(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"CursorLingo \u2014 %ls", g_code);
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
     if (g_trayIcon) DestroyIcon(g_trayIcon);
     g_trayIcon = icon;

@@ -5,8 +5,8 @@ IDI_APP ICON "../assets/AppIcon.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "CursorLingo.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,1,2,0
- PRODUCTVERSION 1,1,2,0
+ FILEVERSION 1,1,3,0
+ PRODUCTVERSION 1,1,3,0
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -16,12 +16,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "CursorLingo"
       VALUE "FileDescription", "CursorLingo - input language badge at the mouse pointer"
-      VALUE "FileVersion", "1.1.2"
+      VALUE "FileVersion", "1.1.3"
       VALUE "InternalName", "CursorLingo"
       VALUE "LegalCopyright", "MIT License"
       VALUE "OriginalFilename", "CursorLingo.exe"
       VALUE "ProductName", "CursorLingo"
-      VALUE "ProductVersion", "1.1.2"
+      VALUE "ProductVersion", "1.1.3"
     END
   END
   BLOCK "VarFileInfo"
