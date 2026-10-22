@@ -14,6 +14,11 @@
 </p>
 
 <p align="center">
+  <img src="assets/demo.gif" width="800" alt="แอนิเมชันสาธิต: พิมพ์ไทยตอนแป้นเป็นอังกฤษแล้วกลายเป็น สวัสดีครับ ระหว่างพิมพ์ พิมพ์อังกฤษตอนแป้นเป็นไทยแล้วถูกแก้ตอนกด Space กด Shift สองครั้งเพื่อแปลงคำหรือข้อความที่คลุม และป้าย EN/TH ตามตัวชี้เมาส์">
+  <br><sub><a href="assets/demo.mp4">▶ ดูแบบ HD (MP4)</a></sub>
+</p>
+
+<p align="center">
   <img src="assets/styles.png" width="560" alt="รูปแบบป้าย: Color, Light, Dark, Dot">
 </p>
 

@@ -14,6 +14,11 @@
 </p>
 
 <p align="center">
+  <img src="assets/demo.gif" width="800" alt="Animated demo: Thai typed on the English keyboard turns into สวัสดีครับ as you type, English typed on the Thai keyboard is fixed at Space, double-tap Shift converts a word or a selection, and the EN/TH badge follows the pointer">
+  <br><sub><a href="assets/demo.mp4">▶ Watch in HD (MP4)</a></sub>
+</p>
+
+<p align="center">
   <img src="assets/styles.png" width="560" alt="Badge styles: Color, Light, Dark, Dot">
 </p>
 
@@ -171,10 +176,10 @@ macos/     CursorLingo.swift · Info.plist · build.sh (universal binary)
 windows/   CursorLingo.cpp · CursorLingo.rc · manifest · CMakeLists.txt · build.bat · install.ps1
 tests/     layoutfix_test.cpp
 assets/    AppIcon.png / .icns / .ico, screenshots
-tools/     make-icon.swift (vector icon generator) · ai-icon.sh (optional AI icon) · gen-en-model.py
+tools/     make-icon.swift (vector icon generator) · make-demo.swift (README animation) · ai-icon.sh (optional AI icon) · gen-en-model.py
 ```
 
-The icon is drawn in code by `tools/make-icon.swift`. To try an AI-generated icon, run `OPENAI_API_KEY=… ./tools/ai-icon.sh`.
+The icon is drawn in code by `tools/make-icon.swift`, and the demo animation by `tools/make-demo.swift` (`swiftc -O tools/make-demo.swift -o /tmp/make-demo && /tmp/make-demo`). To try an AI-generated icon, run `OPENAI_API_KEY=… ./tools/ai-icon.sh`.
 
 ## License
 
