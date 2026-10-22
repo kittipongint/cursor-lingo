@@ -3,8 +3,9 @@
 // Design goals:
 //   * Event-driven: no polling timers. The badge moves on mouse events and redraws
 //     only when the input source changes.
-//   * Tiny footprint: one borderless click-through panel, one status item, no
-//     keyboard monitoring, no network.
+//   * Tiny footprint: one borderless click-through panel, one status item, no network.
+//   * Keyboard monitoring exists only for the optional "Auto-fix wrong language" feature. It is
+//     off by default, needs explicit macOS permission, and keeps nothing but the word being typed.
 //   * Optional launch at login (SMAppService, with a LaunchAgent fallback).
 
 import AppKit
@@ -42,6 +43,11 @@ struct Settings {
         get { BadgeSize(rawValue: d.string(forKey: "size") ?? "") ?? .medium }
         set { d.set(newValue.rawValue, forKey: "size") }
     }
+    /// Re-type words that were typed in the wrong layout (EN <-> TH). Off by default.
+    static var autoFix: Bool {
+        get { d.bool(forKey: "autoFix") }
+        set { d.set(newValue, forKey: "autoFix") }
+    }
     /// Language codes (e.g. "EN") for which the badge is hidden.
     static var hidden: Set<String> {
         get { Set(d.stringArray(forKey: "hidden") ?? []) }
@@ -67,6 +73,38 @@ enum InputSource {
             if id.localizedCaseInsensitiveContains("thai") { return "TH" }
         }
         return "??"
+    }
+}
+
+extension InputSource {
+    private static let enIDs = ["com.apple.keylayout.ABC", "com.apple.keylayout.US", "com.apple.keylayout.USExtended"]
+    private static let thID = "com.apple.keylayout.Thai"
+
+    static func currentID() -> String? {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+              let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+        return Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+    }
+
+    /// The layout the auto-fixer understands: 0 = US/ABC, 1 = Thai (Kedmanee), nil = anything else.
+    static func fixLanguage() -> Int? {
+        guard let id = currentID() else { return nil }
+        if enIDs.contains(id) { return 0 }
+        return id == thID ? 1 : nil
+    }
+
+    /// Selects an enabled US/ABC (0) or Thai (1) layout.
+    static func select(_ language: Int) {
+        let wanted = language == 0 ? enIDs : [thID]
+        guard let list = TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource] else { return }
+        for id in wanted {
+            for source in list {
+                guard let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID),
+                      (Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String) == id else { continue }
+                TISSelectInputSource(source)
+                return
+            }
+        }
     }
 }
 
@@ -150,6 +188,138 @@ final class BadgeView: NSView {
     }
 }
 
+// MARK: - Auto-fix wrong language
+
+/// Watches typing (listen-only event tap) and, at the end of a word, re-types it in the other layout when the
+/// detector in core/layoutfix.h says it was typed with the wrong one. Only the current word is ever kept in
+/// memory; nothing is logged or stored, and nothing is observed while secure input (password fields) is on.
+final class AutoFix {
+    private static let marker: Int64 = 0x434C47  // tags our own synthetic events so we never react to them
+    private static let terminals: Set<String> = [
+        "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "org.alacritty",
+        "com.github.wez.wezterm", "net.kovidgoyal.kitty", "dev.warp.Warp-Stable", "co.zeit.hyper",
+    ]
+
+    private var tap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var keys: [UInt8] = []
+    private var language: Int?          // layout currently on screen: 0 = EN, 1 = TH, nil = unsupported
+    private let source = CGEventSource(stateID: .privateState)
+
+    var isRunning: Bool { tap != nil }
+
+    static var hasPermission: Bool { CGPreflightListenEventAccess() && CGPreflightPostEventAccess() }
+    static func requestPermission() {
+        if !CGPreflightListenEventAccess() { _ = CGRequestListenEventAccess() }
+        if !CGPreflightPostEventAccess() { _ = CGRequestPostEventAccess() }
+    }
+
+    @discardableResult
+    func start() -> Bool {
+        if tap != nil { return true }
+        guard AutoFix.hasPermission else { return false }
+        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            if let refcon { Unmanaged<AutoFix>.fromOpaque(refcon).takeUnretainedValue().handle(type, event) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
+                                           eventsOfInterest: mask, callback: callback,
+                                           userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        tap = port
+        runLoopSource = CFMachPortCreateRunLoopSource(nil, port, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        inputChanged()
+        return true
+    }
+
+    func stop() {
+        if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+        tap = nil
+        runLoopSource = nil
+        keys.removeAll()
+    }
+
+    /// Call whenever the input source or the frontmost app changes: a word never spans either.
+    func inputChanged() {
+        keys.removeAll()
+        language = InputSource.fixLanguage()
+    }
+
+    private func handle(_ type: CGEventType, _ event: CGEvent) {
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            keys.removeAll()
+            return
+        case .keyDown:
+            break
+        default:
+            keys.removeAll()  // a click moves the caret: the word is over
+            return
+        }
+        if event.getIntegerValueField(.eventSourceUserData) == AutoFix.marker { return }
+        guard let language, !IsSecureEventInputEnabled() else { keys.removeAll(); return }
+
+        let flags = event.flags
+        if !flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]) { keys.removeAll(); return }
+
+        let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        switch code {
+        case 51: if !keys.isEmpty { keys.removeLast() }; return    // delete
+        case 49: endOfWord(language: language); return              // space
+        default: break
+        }
+        let index = lf_key_from_mac_keycode(Int32(code))
+        guard index >= 0, keys.count < 48 else { keys.removeAll(); return }  // return, tab, arrows, ...
+        keys.append(UInt8(index) | (flags.contains(.maskShift) ? 0x80 : 0))
+
+        // A long run with no spaces (typical for Thai) is checked as it grows, so it is fixed early.
+        if language == 0, keys.count >= 6, lf_should_convert(keys, Int32(keys.count), 0, false) {
+            fix(language: language, trailingSpace: false)
+        }
+    }
+
+    private func endOfWord(language: Int) {
+        defer { keys.removeAll() }
+        guard keys.count >= 3, !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
+        else { return }
+        if lf_should_convert(keys, Int32(keys.count), Int32(language), true) {
+            fix(language: language, trailingSpace: true)
+        }
+    }
+
+    /// Replaces the word on screen (plus the space that ended it) with the other layout's reading of the same keys.
+    private func fix(language: Int, trailingSpace: Bool) {
+        let word = keys
+        keys.removeAll()
+        let target = 1 - language
+        var buffer = [UInt16](repeating: 0, count: word.count + 1)
+        _ = lf_render(word, Int32(word.count), Int32(target), &buffer)
+        var text = Array(buffer.prefix(word.count))
+        if trailingSpace { text.append(0x20) }
+        let erase = word.count + (trailingSpace ? 1 : 0)
+
+        DispatchQueue.main.async { [self] in
+            InputSource.select(target)   // first, so keys typed meanwhile already land in the right layout
+            for _ in 0..<erase { post(keyCode: 51) }
+            for unit in text { post(keyCode: 0, unicode: unit) }
+        }
+    }
+
+    private func post(keyCode: CGKeyCode, unicode: UInt16? = nil) {
+        for down in [true, false] {
+            guard let e = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: down) else { continue }
+            e.setIntegerValueField(.eventSourceUserData, value: AutoFix.marker)
+            e.flags = []
+            if var u = unicode { e.keyboardSetUnicodeString(stringLength: 1, unicodeString: &u) }
+            e.post(tap: .cghidEventTap)
+        }
+    }
+}
+
 // MARK: - Launch at login
 
 enum LoginItem {
@@ -200,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var screenFrames: [NSRect] = []
     private var badgeSize = NSSize.zero
     private var visible = false
+    private let autoFix = AutoFix()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildPanel()
@@ -222,8 +393,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self, selector: #selector(cacheScreens),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(frontAppChanged),
+            name: NSWorkspace.didActivateApplicationNotification, object: nil)
+
         refresh(animated: false)
+        if Settings.autoFix { autoFix.start() }   // never prompts at launch; see toggleAutoFix()
     }
+
+    @objc private func frontAppChanged() { autoFix.inputChanged() }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitors.forEach(NSEvent.removeMonitor)
@@ -268,6 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func inputSourceChanged() { refresh(animated: true) }
 
     private func refresh(animated: Bool) {
+        autoFix.inputChanged()
         let code = InputSource.currentCode()
         badge.code = code
         badge.style = Settings.style
@@ -357,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(submenu("Style", BadgeStyle.allCases.map(\.rawValue), selected: Settings.style.rawValue, #selector(pickStyle)))
         menu.addItem(submenu("Size", BadgeSize.allCases.map(\.rawValue), selected: Settings.size.rawValue, #selector(pickSize)))
         menu.addItem(.separator())
+        menu.addItem(item("Auto-fix wrong language (EN ⇄ TH)", #selector(toggleAutoFix), on: Settings.autoFix && autoFix.isRunning))
         menu.addItem(item("Launch at Login", #selector(toggleLogin), on: LoginItem.isEnabled))
         menu.addItem(.separator())
         menu.addItem(item("Quit CursorLingo", #selector(quit), key: "q"))
@@ -403,6 +583,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func clearHidden() {
         Settings.hidden = []
         refresh(animated: true)
+    }
+    @objc private func toggleAutoFix() {
+        if Settings.autoFix {
+            Settings.autoFix = false
+            autoFix.stop()
+            return
+        }
+        Settings.autoFix = true
+        if autoFix.start() { return }
+
+        AutoFix.requestPermission()
+        let alert = NSAlert()
+        alert.messageText = "Allow keyboard access for Auto-fix"
+        alert.informativeText = "CursorLingo reads each word you type, in memory only, to notice words typed in the wrong "
+            + "language. Allow CursorLingo under Privacy & Security → Input Monitoring and Accessibility, then choose "
+            + "Auto-fix again (you may need to relaunch the app). Nothing is stored or sent anywhere."
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+        Settings.autoFix = false
     }
     @objc private func toggleLogin() { LoginItem.set(!LoginItem.isEnabled) }
     @objc private func quit() { NSApp.terminate(nil) }

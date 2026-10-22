@@ -21,7 +21,8 @@
 - **Hide per language.** For example, show the badge only when you're *not* in English.
 - **Launch at login / Start with Windows**, toggled from the menu.
 - **Click-through.** The badge never steals clicks or focus.
-- **Private.** No keyboard hooks, no keystroke access, no network, no telemetry.
+- **Auto-fix wrong language (optional, off by default).** Typed `l;ylfu;yoouhgik` instead of `สวัสดีวันนี้เรา`, or `ะ้รห` instead of `this`? CursorLingo re-types the word and switches the layout for you. English ⇄ Thai. See [Auto-fix](#auto-fix-wrong-language).
+- **Private.** No network, no telemetry. Keystrokes are only observed if you turn Auto-fix on, and then only the current word is kept in memory.
 - **Light on resources.** It's event-driven, with no polling timers on macOS.
 
 |                  | macOS                                  | Windows                                        |
@@ -56,8 +57,12 @@ No Accessibility or Input Monitoring permission is needed.
 
 ### Windows 10 / 11 (x64)
 
-Download `CursorLingo-Windows-x64.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, and run `CursorLingo.exe`.
-Right-click the tray icon → **Start with Windows** to launch it automatically.
+Download `CursorLingo-Windows-x64.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases) and unzip it. **No administrator rights are needed**, there is no installer, and nothing is written outside your user profile. Pick one:
+
+- **Portable:** run `CursorLingo.exe` from any folder (Desktop, USB stick, ...).
+- **Per-user install** (like VS Code's user installer): in PowerShell run `.\install.ps1` (add `-Startup` to start with Windows). It copies the exe to `%LOCALAPPDATA%\Programs\CursorLingo` and adds a Start Menu shortcut. `.\install.ps1 -Uninstall` removes it.
+
+Right-click the tray icon → **Start with Windows** to launch it automatically (it follows the exe if you move it).
 SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
 
 **Or build from source** with Visual Studio 2022 or Build Tools + CMake:
@@ -74,6 +79,26 @@ x86_64-w64-mingw32-g++ -std=c++17 -Os -municode -mwindows -static windows/Cursor
   -o CursorLingo.exe -luser32 -lgdi32 -lshell32 -ladvapi32 -lshcore -s
 ```
 
+## Auto-fix wrong language
+
+Turn on **Auto-fix wrong language (EN ⇄ TH)** from the menu. When you finish a word with Space, and it looks like gibberish in the current layout but like a real word in the other one, CursorLingo erases it, types it again from the same keys, and switches the layout so you can keep going. Long Thai runs typed without spaces are fixed after a few characters.
+
+**How it decides.** A key press is a *physical key*, and every physical key produces one character in each layout. A word typed in the wrong layout is therefore the right text seen through the wrong key map. For each word, CursorLingo computes both readings and converts only when:
+
+1. the reading on screen is implausible for its language, and
+2. the other reading is plausible for its language.
+
+*English plausibility* uses a letter-trigram model (real words are cheap; Thai typed on a Latin layout is full of impossible sequences and punctuation keys such as `; ' , .` inside words). *Thai plausibility* uses Thai orthography: a word can't start with a tone mark or trailing vowel, vowels sit on consonants, a leading vowel needs a consonant after it, and so on. English typed on the Thai layout breaks these rules almost immediately. Short words (under 3 keys), numbers, paths, URLs, e-mail addresses and code-like words are never touched, because precision matters more than recall.
+
+On a sample of real English and Thai words, correct text was wrongly changed in fewer than 1 in 1,000 cases, and about 80 % of wrong-layout words were fixed. Words it is unsure about are left alone.
+
+**Privacy and permissions.**
+- Off by default. The keyboard hook / event tap only exists while the option is on.
+- Only the current word is kept, in memory. Nothing is logged, stored or sent anywhere.
+- macOS asks for **Input Monitoring** and **Accessibility**. Secure input (password fields) and Terminal apps are skipped.
+- Windows needs no special rights, but cannot see windows running as administrator. Classic password boxes and consoles are skipped.
+- Only the stock US-English and Thai (Kedmanee) layouts are supported; other layouts are left alone.
+
 ## Usage
 
 Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
@@ -81,21 +106,24 @@ Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
 - see the current input language,
 - hide the badge for the current language, or show it for all languages again,
 - choose **Show**, **Style** and **Size**,
+- toggle **Auto-fix wrong language**,
 - toggle **Launch at Login** / **Start with Windows**,
 - quit.
 
 ## Uninstall
 
 - **macOS:** `./uninstall.sh`, or quit the app and delete it. Turn off *Launch at Login* first.
-- **Windows:** untick *Start with Windows*, quit, and delete the exe. Settings live in `HKCU\Software\CursorLingo`.
+- **Windows:** `.\install.ps1 -Uninstall` if you used the installer; otherwise untick *Start with Windows*, quit, and delete the exe. Settings live in `HKCU\Software\CursorLingo`.
 
 ## Project layout
 
 ```
+core/      layoutfix.h (wrong-layout detector, shared) · en_model.inc (generated) · C interface for Swift
 macos/     CursorLingo.swift · Info.plist · build.sh (universal binary)
-windows/   CursorLingo.cpp · CursorLingo.rc · manifest · CMakeLists.txt · build.bat
+windows/   CursorLingo.cpp · CursorLingo.rc · manifest · CMakeLists.txt · build.bat · install.ps1
+tests/     layoutfix_test.cpp
 assets/    AppIcon.png / .icns / .ico, screenshots
-tools/     make-icon.swift (vector icon generator) · ai-icon.sh (optional AI icon)
+tools/     make-icon.swift (vector icon generator) · ai-icon.sh (optional AI icon) · gen-en-model.py
 ```
 
 The icon is drawn in code by `tools/make-icon.swift`. To try an AI-generated icon, run `OPENAI_API_KEY=… ./tools/ai-icon.sh`.

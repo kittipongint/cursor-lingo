@@ -4,7 +4,11 @@
 //   * The badge follows the mouse via a low-level mouse hook (event-driven, coalesced).
 //   * Rendering happens only when the language, style, size or monitor DPI changes.
 //   * The badge is a per-pixel-alpha layered window, so it is anti-aliased and click-through.
-//   * No keyboard hook: the active layout is read with GetKeyboardLayout().
+//   * The active layout is read with GetKeyboardLayout(). A keyboard hook exists only while the optional
+//     "Auto-fix wrong language" feature is switched on (off by default); it keeps nothing but the word
+//     being typed, in memory, and never touches the network or disk.
+//   * Runs as a normal user: no administrator rights, no installer, no services. The registry is only
+//     touched under HKCU.
 
 #ifndef UNICODE
 #define UNICODE
@@ -26,6 +30,7 @@
 #include <cwctype>
 
 #include "resource.h"
+#include "../core/layoutfix.h"
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -48,6 +53,7 @@ struct Settings {
     DWORD style = STYLE_COLOR;
     DWORD mode = MODE_ALWAYS;
     DWORD size = SIZE_MEDIUM;
+    DWORD autoFix = 0;          // re-type words typed in the wrong layout (EN <-> TH)
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
 
@@ -63,6 +69,7 @@ static void LoadSettings() {
     g_set.style = RegReadDword(k, L"Style", STYLE_COLOR, STYLE_COUNT);
     g_set.mode = RegReadDword(k, L"Mode", MODE_ALWAYS, MODE_COUNT);
     g_set.size = RegReadDword(k, L"Size", SIZE_MEDIUM, SIZE_COUNT);
+    g_set.autoFix = RegReadDword(k, L"AutoFix", 0, 2);
     DWORD cb = sizeof(g_set.hidden) - sizeof(wchar_t);
     if (RegQueryValueExW(k, L"Hidden", nullptr, nullptr, (BYTE*)g_set.hidden, &cb) != ERROR_SUCCESS) g_set.hidden[0] = 0;
     g_set.hidden[255] = 0;
@@ -75,6 +82,7 @@ static void SaveSettings() {
     RegSetValueExW(k, L"Style", 0, REG_DWORD, (BYTE*)&g_set.style, sizeof(DWORD));
     RegSetValueExW(k, L"Mode", 0, REG_DWORD, (BYTE*)&g_set.mode, sizeof(DWORD));
     RegSetValueExW(k, L"Size", 0, REG_DWORD, (BYTE*)&g_set.size, sizeof(DWORD));
+    RegSetValueExW(k, L"AutoFix", 0, REG_DWORD, (BYTE*)&g_set.autoFix, sizeof(DWORD));
     RegSetValueExW(k, L"Hidden", 0, REG_SZ, (BYTE*)g_set.hidden, (DWORD)((wcslen(g_set.hidden) + 1) * sizeof(wchar_t)));
     RegCloseKey(k);
 }
@@ -126,9 +134,20 @@ static void SetStartup(bool on) {
 
 static HKL g_lastHkl = nullptr;
 static wchar_t g_code[4] = L"??";
+static int g_fixLang = -1;  // layout the auto-fixer understands: 0 = US English, 1 = Thai (Kedmanee), -1 = other
+static int g_fixLen = 0;    // keys of the word being typed (see the auto-fix section)
 
-// Returns true when the language code changed.
-static bool UpdateLanguage() {
+// Only the stock layouts: remapped ones (Dvorak, Pattachote, ...) have a different key->letter table.
+static int FixLangOf(HKL hkl) {
+    UINT_PTR v = (UINT_PTR)hkl;
+    if (HIWORD(v) != LOWORD(v)) return -1;
+    if (LOWORD(v) == 0x0409) return 0;
+    if (LOWORD(v) == 0x041E) return 1;
+    return -1;
+}
+
+// Keyboard layout of the window that receives typing.
+static HKL CurrentHkl() {
     HWND fg = GetForegroundWindow();
     GUITHREADINFO gti = {sizeof(gti)};
     DWORD tid = 0;
@@ -137,9 +156,16 @@ static bool UpdateLanguage() {
         // UWP apps host their input on a different thread than the frame window.
         if (GetGUIThreadInfo(tid, &gti) && gti.hwndFocus) tid = GetWindowThreadProcessId(gti.hwndFocus, nullptr);
     }
-    HKL hkl = GetKeyboardLayout(tid);
+    return GetKeyboardLayout(tid);
+}
+
+// Returns true when the language code changed.
+static bool UpdateLanguage() {
+    HKL hkl = CurrentHkl();
     if (!hkl || hkl == g_lastHkl) return false;
     g_lastHkl = hkl;
+    g_fixLang = FixLangOf(hkl);
+    g_fixLen = 0;  // a word never spans a layout change
 
     wchar_t name[LOCALE_NAME_MAX_LENGTH] = L"";
     wchar_t code[4] = L"??";
@@ -296,15 +322,16 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 
 #define WM_APP_MOVE (WM_APP + 1)
 #define WM_APP_TRAY (WM_APP + 2)
+#define WM_APP_FIX (WM_APP + 3)
 enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3 };
 enum {
-    ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_QUIT,
+    ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_AUTOFIX, ID_QUIT,
     ID_STYLE_BASE = 200, ID_MODE_BASE = 300, ID_SIZE_BASE = 400,
 };
 
 static HINSTANCE g_inst;
 static HWND g_badge, g_host;
-static HHOOK g_mouseHook;
+static HHOOK g_mouseHook, g_kbHook;
 static HWINEVENTHOOK g_fgHook;
 static UINT g_taskbarCreated;
 static Bitmap g_img;
@@ -445,7 +472,132 @@ static void Refresh(bool switched) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-fix wrong language
+// ---------------------------------------------------------------------------
+//
+// A low-level keyboard hook records the *physical keys* of the current word (scan codes, so the
+// layout does not matter). At a space the word is judged by core/layoutfix.h; when it was typed in the
+// wrong layout, the word and the space are erased and typed again from the other layout's reading of
+// the same keys, and the layout is switched so typing continues correctly.
+
+static uint8_t g_fixKeys[lf::kMaxWord];
+static uint8_t g_fixWord[lf::kMaxWord];  // hand-off to the message loop
+static int g_fixWordLen = 0;
+
+static bool FocusIsPassword() {
+    HWND fg = GetForegroundWindow();
+    GUITHREADINFO gti = {sizeof(gti)};
+    if (!fg || !GetGUIThreadInfo(GetWindowThreadProcessId(fg, nullptr), &gti) || !gti.hwndFocus) return false;
+    wchar_t cls[16];
+    if (!GetClassNameW(gti.hwndFocus, cls, 16) || _wcsicmp(cls, L"Edit") != 0) return false;
+    return (GetWindowLongPtrW(gti.hwndFocus, GWL_STYLE) & ES_PASSWORD) != 0;
+}
+
+static bool ForegroundIsTerminal() {
+    wchar_t cls[48];
+    HWND fg = GetForegroundWindow();
+    if (!fg || !GetClassNameW(fg, cls, 48)) return false;
+    return wcscmp(cls, L"ConsoleWindowClass") == 0 || wcscmp(cls, L"CASCADIA_HOSTING_WINDOW_CLASS") == 0 ||
+           wcscmp(cls, L"mintty") == 0;
+}
+
+static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)) {
+        const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)lp;
+        if (k->flags & LLKHF_INJECTED) return CallNextHookEx(nullptr, code, wp, lp);  // ours or another tool's
+
+        if (wp == WM_SYSKEYDOWN || (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000) ||
+            (GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000)) {
+            g_fixLen = 0;  // shortcut
+        } else if (k->vkCode == VK_BACK) {
+            if (g_fixLen > 0) g_fixLen--;
+        } else if (k->vkCode == VK_SPACE) {
+            int n = g_fixLen;
+            g_fixLen = 0;
+            if (n >= 3 && g_fixLang >= 0 && !ForegroundIsTerminal() &&
+                lf::shouldConvert(g_fixKeys, n, (lf::Lang)g_fixLang, true)) {
+                memcpy(g_fixWord, g_fixKeys, n);
+                g_fixWordLen = n;
+                PostMessageW(g_host, WM_APP_FIX, 1, 0);  // 1 = also re-type the space
+            }
+        } else {
+            int idx = (k->flags & LLKHF_EXTENDED) ? -1 : lf::keyIndexFrom(lf::kWinScan, (int)k->scanCode);
+            if (idx < 0 || g_fixLen >= lf::kMaxWord) {
+                g_fixLen = 0;
+            } else {
+                if (g_fixLen == 0) {
+                    g_fixLang = FixLangOf(CurrentHkl());  // fresh layout at the start of each word
+                    if (g_fixLang < 0 || FocusIsPassword()) return CallNextHookEx(nullptr, code, wp, lp);
+                }
+                g_fixKeys[g_fixLen++] = (uint8_t)(idx | ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ? lf::kShiftBit : 0));
+                // A long run without spaces (typical for Thai) is checked as it grows, so it is fixed early.
+                if (g_fixLang == 0 && g_fixLen >= 6 && lf::shouldConvert(g_fixKeys, g_fixLen, lf::LANG_EN, false)) {
+                    memcpy(g_fixWord, g_fixKeys, g_fixLen);
+                    g_fixWordLen = g_fixLen;
+                    g_fixLen = 0;
+                    PostMessageW(g_host, WM_APP_FIX, 0, 0);
+                }
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+static void SetAutoFix(bool on) {
+    g_fixLen = 0;
+    if (on && !g_kbHook) g_kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, g_inst, 0);
+    if (!on && g_kbHook) { UnhookWindowsHookEx(g_kbHook); g_kbHook = nullptr; }
+}
+
+static HKL FindLayout(int lang) {
+    HKL list[64];
+    int n = GetKeyboardLayoutList(64, list);
+    WORD want = lang == 0 ? 0x0409 : 0x041E;
+    for (int i = 0; i < n; i++)
+        if (FixLangOf(list[i]) == lang && LOWORD((UINT_PTR)list[i]) == want) return list[i];
+    return nullptr;
+}
+
+// Runs from the message loop (never inside the hook): erase the word, type the other reading, switch layout.
+static void ApplyFix(bool trailingSpace) {
+    const int n = g_fixWordLen;
+    if (n <= 0 || g_fixLang < 0) return;
+    const int target = 1 - g_fixLang;
+    char16_t text[lf::kMaxWord + 2];
+    lf::render(g_fixWord, n, target ? lf::LANG_TH : lf::LANG_EN, text);
+    int len = n;
+    if (trailingSpace) text[len++] = u' ';
+    const int erase = n + (trailingSpace ? 1 : 0);
+
+    // Switch first so keys typed in the meantime already land in the right layout.
+    if (HKL hkl = FindLayout(target)) {
+        HWND fg = GetForegroundWindow();
+        if (fg) PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
+    }
+
+    INPUT in[(lf::kMaxWord + 2) * 4] = {};
+    int c = 0;
+    for (int i = 0; i < erase; i++)
+        for (int up = 0; up < 2; up++) {
+            in[c].type = INPUT_KEYBOARD;
+            in[c].ki.wVk = VK_BACK;
+            in[c].ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+            c++;
+        }
+    for (int i = 0; i < len; i++)
+        for (int up = 0; up < 2; up++) {
+            in[c].type = INPUT_KEYBOARD;
+            in[c].ki.wScan = (WORD)text[i];
+            in[c].ki.dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0);
+            c++;
+        }
+    SendInput((UINT)c, in, sizeof(INPUT));
+    g_fixWordLen = 0;
+}
+
 static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) g_fixLen = 0;  // caret moved
     if (code == HC_ACTION && wp == WM_MOUSEMOVE && g_visible) {
         g_pt = ((MSLLHOOKSTRUCT*)lp)->pt;
         // Coalesce: at most one pending move message, so fast mice never flood the queue.
@@ -456,6 +608,7 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
 
 static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
     g_fullscreen = ForegroundIsFullscreen();
+    g_fixLen = 0;
     bool changed = UpdateLanguage();
     Refresh(changed);
     if (g_visible) SetWindowPos(g_badge, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -492,6 +645,7 @@ static void ShowMenu() {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, L"Style");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)size, L"Size");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING | (g_set.autoFix ? MF_CHECKED : 0), ID_AUTOFIX, L"Auto-fix wrong language (EN \u21C4 TH)");
     AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, L"Start with Windows");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit CursorLingo");
@@ -505,6 +659,12 @@ static void ShowMenu() {
     if (!cmd) return;
     if (cmd == ID_QUIT) { DestroyWindow(g_host); return; }
     if (cmd == ID_STARTUP) { SetStartup(!StartupEnabled()); return; }
+    if (cmd == ID_AUTOFIX) {
+        g_set.autoFix = !g_set.autoFix;
+        SetAutoFix(g_set.autoFix != 0);
+        SaveSettings();
+        return;
+    }
     if (cmd == ID_HIDE_CURRENT) ToggleHidden(g_code);
     else if (cmd == ID_SHOW_ALL) g_set.hidden[0] = 0;
     else if (cmd >= ID_STYLE_BASE && cmd < ID_STYLE_BASE + STYLE_COUNT) g_set.style = cmd - ID_STYLE_BASE;
@@ -552,6 +712,9 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_TRAY:
             if (LOWORD(lp) == WM_CONTEXTMENU || LOWORD(lp) == NIN_SELECT || LOWORD(lp) == NIN_KEYSELECT) ShowMenu();
             return 0;
+        case WM_APP_FIX:
+            ApplyFix(wp != 0);
+            return 0;
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:
             g_monRect = {1, 1, 0, 0};  // force monitor re-query
@@ -594,7 +757,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     AddTrayIcon();
     Refresh(false);
 
+    // Portable use: if the exe was moved, keep "Start with Windows" pointing at its current location.
+    if (StartupEnabled()) SetStartup(true);
+
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, inst, 0);
+    if (g_set.autoFix) SetAutoFix(true);
     g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundChanged, 0, 0,
                                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     // Coalescable timer lets Windows batch our wake-ups with others to save power.
@@ -607,6 +774,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
 
     UnhookWindowsHookEx(g_mouseHook);
+    SetAutoFix(false);
     UnhookWinEvent(g_fgHook);
     if (g_trayIcon) DestroyIcon(g_trayIcon);
     ReleaseMutex(mutex);
