@@ -85,18 +85,21 @@ inline bool isTrailingPunct(char16_t c) {
 
 // Average cost (nats per letter) of an English-looking reading, or a large value when it contains
 // characters that never occur inside an English word. Lower = more English.
-inline float englishCost(const char16_t* s, int n) {
+// `complete` = false for a word still being typed: its end is not a word boundary yet.
+inline float englishCost(const char16_t* s, int n, bool complete = true) {
     while (n > 0 && isTrailingPunct(s[n - 1])) n--;  // "word," "word?" "don'"
     if (n == 0) return 99.0f;
-    // Contractions: strip 's / 't / 'd / 'm / 'll / 're / 've.
-    for (int i = 1; i < n; i++) {
-        if (s[i] == '\'') {
-            int rest = n - i - 1;
-            if (rest == 1 || rest == 2) { n = i; break; }
-        }
+    // Contractions: strip 's / 't / 'd / 'm / 'll / 're / 've (only these: ' is also Thai ง).
+    if (n >= 3 && s[n - 2] == '\'') {
+        char16_t c = s[n - 1] | 0x20;
+        if (c == 's' || c == 't' || c == 'd' || c == 'm') n -= 2;
+    } else if (n >= 4 && s[n - 3] == '\'') {
+        char16_t c1 = s[n - 2] | 0x20, c2 = s[n - 1] | 0x20;
+        if ((c1 == 'l' && c2 == 'l') || (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e')) n -= 3;
     }
     int a = 0, b = 0, cost = 0;
-    for (int i = 0; i <= n; i++) {
+    const int last = complete ? n : n - 1;
+    for (int i = 0; i <= last; i++) {
         int c = 0;
         if (i < n) {
             char16_t ch = s[i];
@@ -109,7 +112,7 @@ inline float englishCost(const char16_t* s, int n) {
         b = c;
         if (i < n && c == 0) { a = 0; b = 0; }
     }
-    return cost / 16.0f / (float)(n + 1);
+    return cost / 16.0f / (float)(last + 1);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -182,6 +185,15 @@ inline ThaiParse parseThai(const char16_t* s, int n) {
                 r++;
                 if (follow == 2 && lead == 0x0E40 && r < n && s[r] == 0x0E30) { follow = 4; r++; }
             }
+            // Vowels written with a consonant letter: -อ (ขอ ตอน ร้อย, เ-อ เธอ), เ-ีย / เ-ือ (เรียบ เมื่อ),
+            // and -ว- before a final (ช่วย รวม สวย).
+            int carrier = 0;
+            if (!follow && r < n) {
+                if (s[r] == 0x0E2D && !nuc && (!lead || lead == 0x0E40)) { carrier = 1; r++; }
+                else if (lead == 0x0E40 && nuc == 1 &&
+                         ((s[q] == 0x0E35 && s[r] == 0x0E22) || (s[q] == 0x0E37 && s[r] == 0x0E2D))) { carrier = 1; r++; }
+                else if (!lead && !nuc && s[r] == 0x0E27 && r + 1 < n && thFinalOk(s[r + 1])) { carrier = 2; r++; }
+            }
             // Which combinations are real Thai?
             if (nuc && follow) continue;                                           // กิา กุะ ...
             if (lead == 0x0E44 || lead == 0x0E43) { if (nuc || follow) continue; }  // ไ ใ stand alone
@@ -196,7 +208,8 @@ inline ThaiParse parseThai(const char16_t* s, int n) {
                 if (e < n && s[e] == 0x0E4C) e++;
                 else if (f == 2) continue;
                 if (e < n && (thUpper(s[e]) || thLower(s[e]) || thTone(s[e]) || thFollow(s[e]))) continue;
-                bool explicitVowel = lead || nuc || follow;
+                if (carrier == 2 && f == 0) continue;                            // -ว- needs its final
+                bool explicitVowel = lead || nuc || follow || carrier;
                 if (!explicitVowel && tone && f == 0) continue;                 // "C+tone" alone is not a syllable
                 if (nuc == 1 && s[q] == 0x0E31 && f == 0) {
                     // ั needs a final consonant (ว included): ตัว ตั้ง
@@ -267,7 +280,24 @@ static const Tuning kTune = {};
 // `finished` is false while the user is still typing the word (stricter).
 inline bool shouldConvert(const uint8_t* keys, int n, Lang onScreen, bool finished) {
     const Tuning& t = kTune;
-    if (n < t.minKeys || n > kMaxWord) return false;
+    if (n > kMaxWord) return false;
+    if (n < t.minKeys) {
+        // Two keys are only enough when the Latin reading contains a key that never sits inside an English
+        // word and is no digit, flag or path either: , ; ' [ ]  (",u" = มี, "c]" = แล).
+        if (n != 2 || onScreen != LANG_EN || !finished) return false;
+        char16_t en2[3], th2[3];
+        render(keys, n, LANG_EN, en2);
+        render(keys, n, LANG_TH, th2);
+        int odd = 0;
+        for (int i = 0; i < 2; i++) {
+            char16_t c = en2[i];
+            if (c == ',' || c == ';' || c == '\'' || c == '[' || c == ']') odd++;
+            else if (!isLatin(c)) return false;
+        }
+        if (odd == 0 || (isLatin(en2[0]) && isTrailingPunct(en2[1]))) return false;  // "a," "I'"
+        ThaiParse tp = parseThai(th2, n);
+        return tp.ok && tp.bare == 0;
+    }
     if (!finished && (n < t.midWordMinKeys || onScreen != LANG_EN)) return false;  // English has spaces; only Thai runs on
     if (looksLikeCode(keys, n)) return false;
 
@@ -288,7 +318,7 @@ inline bool shouldConvert(const uint8_t* keys, int n, Lang onScreen, bool finish
     if (onScreen == LANG_EN) {
         // English on screen must look like gibberish...
         // The less clearly Thai the alternative is, the more gibberish-like the English must be.
-        float ec = englishCost(en, n);
+        float ec = englishCost(en, n, finished);
         ThaiParse tp = parseThai(th, thn);
         if (!tp.ok) return false;
         float need;

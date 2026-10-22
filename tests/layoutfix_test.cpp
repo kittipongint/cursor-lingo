@@ -44,6 +44,14 @@ int main() {
     // Thai typed on the English layout -> convert.
     expect("sawasdee", u"l;ylfu;yoouhgik", LANG_EN, true);
     expect("sawasdee (mid-word)", u"l;ylfu;yoouhgik", LANG_EN, true, false);
+    expect("khob khun", u"ขอบคุณ", LANG_TH, false);
+    {   // Common Thai words typed on the English layout (the Thai text is what the keys mean).
+        const char16_t* words[] = {u"ขอบคุณ", u"ตอนนี้", u"ช่วย", u"หน่อย", u"เรียบร้อย", u"มี", u"ทำงาน"};
+        for (auto w : words) {
+            auto k = keysFor(w, LANG_TH);
+            if (!shouldConvert(k.data(), (int)k.size(), LANG_EN, true)) { printf("FAIL: Thai word not fixed\n"); failures++; }
+        }
+    }
     // English typed on the Thai layout -> convert.
     expect("this on Thai layout", u"ะ้รห", LANG_TH, true);
     expect("hello on Thai layout", u"้ำสสน", LANG_TH, true);
@@ -56,6 +64,9 @@ int main() {
     expect("Thai word", u"สวัสดี", LANG_TH, false);
     expect("Thai sentence run", u"ผมกำลังพิมพ์ภาษาไทย", LANG_TH, false);
     expect("short English", u"is", LANG_EN, false);
+    expect("short English + comma", u"a,", LANG_EN, false);
+    expect("two digits", u"4k", LANG_EN, false);
+    expect("cli flag", u"-e", LANG_EN, false);
     expect("number", u"2024", LANG_EN, false);
     expect("path", u"src/main.swift", LANG_EN, false);
     expect("email", u"me@example.com", LANG_EN, false);

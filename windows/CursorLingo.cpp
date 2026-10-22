@@ -515,7 +515,7 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
         } else if (k->vkCode == VK_SPACE) {
             int n = g_fixLen;
             g_fixLen = 0;
-            if (n >= 3 && g_fixLang >= 0 && !ForegroundIsTerminal() &&
+            if (n >= 2 && g_fixLang >= 0 && !ForegroundIsTerminal() &&
                 lf::shouldConvert(g_fixKeys, n, (lf::Lang)g_fixLang, true)) {
                 memcpy(g_fixWord, g_fixKeys, n);
                 g_fixWordLen = n;

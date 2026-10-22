@@ -214,6 +214,16 @@ final class AutoFix {
         if !CGPreflightPostEventAccess() { _ = CGRequestPostEventAccess() }
     }
 
+    /// What the menu shows under the Auto-fix item, so a silent failure is never invisible.
+    var status: String {
+        if !CGPreflightListenEventAccess() { return "Needs Input Monitoring permission" }
+        if !CGPreflightPostEventAccess() { return "Needs Accessibility permission" }
+        if tap == nil { return "Not running yet: relaunch CursorLingo" }
+        if IsSecureEventInputEnabled() { return "Paused: secure input (a password field) is on" }
+        if InputSource.fixLanguage() == nil { return "Paused: this layout isn't supported" }
+        return "Active"
+    }
+
     @discardableResult
     func start() -> Bool {
         if tap != nil { return true }
@@ -284,7 +294,7 @@ final class AutoFix {
 
     private func endOfWord(language: Int) {
         defer { keys.removeAll() }
-        guard keys.count >= 3, !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
+        guard keys.count >= 2, !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
         else { return }
         if lf_should_convert(keys, Int32(keys.count), Int32(language), true) {
             fix(language: language, trailingSpace: true)
@@ -371,6 +381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var badgeSize = NSSize.zero
     private var visible = false
     private let autoFix = AutoFix()
+    private var autoFixRetry: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildPanel()
@@ -398,7 +409,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
 
         refresh(animated: false)
-        if Settings.autoFix { autoFix.start() }   // never prompts at launch; see toggleAutoFix()
+        startAutoFix()   // never prompts at launch; see toggleAutoFix()
+    }
+
+    /// Starts Auto-fix if it is wanted. Until macOS grants the permissions, retries every 2 s so that it
+    /// switches on by itself right after the user allows it, without a second trip to the menu.
+    private func startAutoFix() {
+        autoFixRetry?.invalidate()
+        autoFixRetry = nil
+        guard Settings.autoFix, !autoFix.start() else { return }
+        autoFixRetry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
+            guard let self, Settings.autoFix else { t.invalidate(); return }
+            if self.autoFix.start() { t.invalidate(); self.autoFixRetry = nil }
+        }
     }
 
     @objc private func frontAppChanged() { autoFix.inputChanged() }
@@ -536,7 +559,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(submenu("Style", BadgeStyle.allCases.map(\.rawValue), selected: Settings.style.rawValue, #selector(pickStyle)))
         menu.addItem(submenu("Size", BadgeSize.allCases.map(\.rawValue), selected: Settings.size.rawValue, #selector(pickSize)))
         menu.addItem(.separator())
-        menu.addItem(item("Auto-fix wrong language (EN ⇄ TH)", #selector(toggleAutoFix), on: Settings.autoFix && autoFix.isRunning))
+        menu.addItem(item("Auto-fix wrong language (EN ⇄ TH)", #selector(toggleAutoFix), on: Settings.autoFix))
+        if Settings.autoFix {
+            let status = autoFix.status
+            let line = NSMenuItem(title: "    " + status, action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            menu.addItem(line)
+            if status.hasPrefix("Needs") { menu.addItem(item("    Open Privacy Settings…", #selector(openPrivacySettings))) }
+            if status.hasPrefix("Not running") { menu.addItem(item("    Relaunch CursorLingo", #selector(relaunch))) }
+        }
         menu.addItem(item("Launch at Login", #selector(toggleLogin), on: LoginItem.isEnabled))
         menu.addItem(.separator())
         menu.addItem(item("Quit CursorLingo", #selector(quit), key: "q"))
@@ -587,26 +618,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleAutoFix() {
         if Settings.autoFix {
             Settings.autoFix = false
+            autoFixRetry?.invalidate()
             autoFix.stop()
             return
         }
-        Settings.autoFix = true
-        if autoFix.start() { return }
+        Settings.autoFix = true   // stays on while waiting for permission; the menu shows what is missing
+        startAutoFix()
+        if autoFix.isRunning { return }
 
         AutoFix.requestPermission()
         let alert = NSAlert()
         alert.messageText = "Allow keyboard access for Auto-fix"
         alert.informativeText = "CursorLingo reads each word you type, in memory only, to notice words typed in the wrong "
-            + "language. Allow CursorLingo under Privacy & Security → Input Monitoring and Accessibility, then choose "
-            + "Auto-fix again (you may need to relaunch the app). Nothing is stored or sent anywhere."
+            + "language. Turn CursorLingo on under Privacy & Security → Input Monitoring and → Accessibility. "
+            + "Auto-fix starts by itself once both are allowed (if not, choose Relaunch from the menu). "
+            + "Nothing is stored or sent anywhere."
         alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Later")
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+        if alert.runModal() == .alertFirstButtonReturn { openPrivacySettings() }
+    }
+    @objc private func openPrivacySettings() {
+        let pane = CGPreflightListenEventAccess() ? "Privacy_Accessibility" : "Privacy_ListenEvent"
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
             NSWorkspace.shared.open(url)
         }
-        Settings.autoFix = false
+    }
+    @objc private func relaunch() {
+        // Start a fresh copy once this one has quit (a running copy makes a new one exit immediately).
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
+        try? p.run()
+        NSApp.terminate(nil)
     }
     @objc private func toggleLogin() { LoginItem.set(!LoginItem.isEnabled) }
     @objc private func quit() { NSApp.terminate(nil) }
