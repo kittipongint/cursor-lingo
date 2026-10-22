@@ -44,13 +44,17 @@
 
 ### macOS (12 Monterey ขึ้นไป ทั้ง Apple Silicon และ Intel)
 
-ดาวน์โหลด `CursorLingo-macOS.zip` จาก [Releases](https://github.com/kittipongint/cursor-lingo/releases) แตกไฟล์ แล้วย้าย **CursorLingo.app** ไปไว้ที่ Applications
+1. ดาวน์โหลด `CursorLingo-macOS.zip` จาก [Releases](https://github.com/kittipongint/cursor-lingo/releases) แตกไฟล์ แล้วย้าย **CursorLingo.app** ไปไว้ที่ **Applications**
+2. **เปิดครั้งแรก:** แอปเซ็นแบบ ad-hoc และยังไม่ได้ผ่าน notarization ของ Apple macOS จึงขึ้นว่า *"CursorLingo" Not Opened – Apple could not verify…* ให้กด **Done** (อย่ากด *Move to Trash*) แล้วเลือกทำอย่างใดอย่างหนึ่ง:
+   - รันคำสั่งนี้ใน Terminal ครั้งเดียว แล้วเปิดแอปตามปกติ:
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/CursorLingo.app
+     ```
+   - หรือเปิด **System Settings → Privacy & Security** เลื่อนลงไปที่ **Security** แล้วกด **Open Anyway** ข้างข้อความ *"CursorLingo" was blocked*
 
-แอปเซ็นแบบ ad-hoc ยังไม่ได้ผ่าน notarization ของ Apple ครั้งแรกที่เปิดให้คลิกขวาที่แอป → **Open** หรือรันคำสั่งนี้:
+   macOS รุ่นใหม่ไม่ยอมให้ผ่านด้วยการคลิกขวา → Open แล้ว
 
-```bash
-xattr -dr com.apple.quarantine /Applications/CursorLingo.app
-```
+ถ้าใช้แค่ป้ายภาษา ไม่ต้องให้สิทธิ์อะไรเพิ่ม สิทธิ์ Input Monitoring และ Accessibility ใช้เฉพาะ [Auto-fix](#เปิด-auto-fix-บน-macos)
 
 **หรือ build เอง** (ต้องมี Xcode Command Line Tools):
 
@@ -58,7 +62,27 @@ xattr -dr com.apple.quarantine /Applications/CursorLingo.app
 git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo && ./install.sh
 ```
 
-ถ้าใช้แค่ป้ายภาษา ไม่ต้องให้สิทธิ์อะไรเพิ่ม สิทธิ์ Input Monitoring และ Accessibility จะถูกขอเฉพาะตอนเปิด Auto-fix
+#### เปิด Auto-fix บน macOS
+
+1. ที่เมนูบนแถบเมนู กด **Auto-fix wrong language (EN ⇄ TH)** บรรทัดใต้เมนูจะบอกว่ายังขาดสิทธิ์อะไร
+2. **Input Monitoring:** กดอนุญาตเมื่อ macOS ถาม หรือกด **Open Privacy Settings…** ในเมนู แล้วเปิดสวิตช์ CursorLingo ใน **Privacy & Security → Input Monitoring**
+3. **Accessibility:** ทำแบบเดียวกันใน **Privacy & Security → Accessibility** ถ้าไม่มี CursorLingo ในรายการ ให้กด **+** แล้วเลือก **Applications → CursorLingo**
+4. **Quit CursorLingo แล้วเปิดใหม่** เพราะแอปอ่านสิทธิ์ตอนเริ่มทำงาน
+5. บรรทัดใต้ Auto-fix ควรขึ้นว่า **Active** ลองทดสอบโดยเปลี่ยนแป้นเป็นอังกฤษ พิมพ์ `l;ylfu` แล้วกด Space ควรได้ **สวัสดี**
+
+**ยังขึ้นว่า "Needs … permission" อยู่?** รายการ CursorLingo ที่ค้างมาจากเวอร์ชันเก่าอาจดูเหมือนเปิดไว้ แต่ไม่มีผลกับเวอร์ชันที่ใช้อยู่ ให้เลือก CursorLingo ในรายการ กด **−** เพื่อลบ แล้วกด **+** เพิ่มใหม่ และเปิดแอปใหม่ ถ้ายังไม่ได้ ให้ล้างรายการเก่าแล้วให้ macOS ถามใหม่:
+
+```bash
+tccutil reset Accessibility io.github.cursorlingo
+```
+
+```bash
+tccutil reset ListenEvent io.github.cursorlingo
+```
+
+จากนั้นเปิด CursorLingo ใหม่ แล้วปิดและเปิด Auto-fix อีกครั้ง
+
+> **ทุกครั้งที่อัปเดตเวอร์ชัน** ต้องทำขั้นตอน "เปิดครั้งแรก" ใหม่ และลบแล้วเพิ่ม CursorLingo ในรายการสิทธิ์ทั้งสองอีกครั้ง เพราะแต่ละเวอร์ชันมีลายเซ็น ad-hoc ใหม่ macOS จึงมองเป็นแอปคนละตัว
 
 ### Windows 10 / 11 (x64)
 
@@ -114,7 +138,7 @@ windows\build.bat
 
 - **ปิดไว้เป็นค่าเริ่มต้น:** ตัวดักแป้นพิมพ์มีอยู่เฉพาะตอนเปิดใช้
 - **เก็บน้อยที่สุด:** เก็บแค่คำปัจจุบันกับคำล่าสุดในหน่วยความจำ และคำที่สั่งย้อนไว้ใน session นี้ ไม่บันทึกลงเครื่องและไม่ส่งไปที่ไหน
-- **macOS:** ขอสิทธิ์ **Input Monitoring** และ **Accessibility** ข้ามช่องรหัสผ่าน (secure input) และแอป Terminal ใต้เมนู Auto-fix มีบรรทัดบอกสถานะ ถ้ายังไม่ได้รับสิทธิ์จะบอกว่าขาดสิทธิ์ไหน
+- **macOS:** ต้องใช้สิทธิ์ **Input Monitoring** และ **Accessibility** (ดู[วิธีเปิด Auto-fix บน macOS](#เปิด-auto-fix-บน-macos)) ข้ามช่องรหัสผ่าน (secure input) และแอป Terminal ใต้เมนู Auto-fix มีบรรทัดบอกสถานะ ถ้ายังไม่ได้รับสิทธิ์จะบอกว่าขาดสิทธิ์ไหน
 - **Windows:** ไม่ต้องใช้สิทธิ์พิเศษ แต่จะมองไม่เห็นหน้าต่างที่รันเป็น admin ข้ามช่องรหัสผ่านแบบมาตรฐานและหน้าต่าง console
 - **แป้นที่รองรับ:** เฉพาะ US English และไทยเกษมณี (Kedmanee) แบบมาตรฐาน แป้นแบบอื่นจะไม่แตะ
 

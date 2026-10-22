@@ -44,12 +44,17 @@ The Windows tray icon itself shows the current language code. The badge also hid
 
 ### macOS (12 Monterey or later, Apple Silicon and Intel)
 
-Download `CursorLingo-macOS.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, and move **CursorLingo.app** to Applications.
-The app is ad-hoc signed, not notarized. The first time you open it, right-click the app → **Open**, or run:
+1. Download `CursorLingo-macOS.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, and move **CursorLingo.app** to **Applications**.
+2. **First launch.** The app is ad-hoc signed, not notarized by Apple, so macOS says *"CursorLingo" Not Opened – Apple could not verify…*. Click **Done** (not *Move to Trash*), then either:
+   - run this once in Terminal, then open the app normally:
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/CursorLingo.app
+     ```
+   - or open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to *"CursorLingo" was blocked*.
 
-```bash
-xattr -dr com.apple.quarantine /Applications/CursorLingo.app
-```
+   On recent macOS, right-click → Open no longer gets past this check.
+
+The badge needs no permissions. Input Monitoring and Accessibility are only needed for [Auto-fix](#turn-on-auto-fix-on-macos).
 
 **Or build from source** (needs the Xcode Command Line Tools):
 
@@ -57,7 +62,27 @@ xattr -dr com.apple.quarantine /Applications/CursorLingo.app
 git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo && ./install.sh
 ```
 
-The badge needs no permissions. Input Monitoring and Accessibility are only requested if you turn on Auto-fix.
+#### Turn on Auto-fix on macOS
+
+1. In the menu-bar menu, click **Auto-fix wrong language (EN ⇄ TH)**. The line under it shows what is still missing.
+2. **Input Monitoring:** allow CursorLingo when macOS asks, or click **Open Privacy Settings…** in the menu and turn CursorLingo on under **Privacy & Security → Input Monitoring**.
+3. **Accessibility:** do the same under **Privacy & Security → Accessibility**. If CursorLingo is not listed, click **+** and choose **Applications → CursorLingo**.
+4. **Quit CursorLingo and open it again.** The app reads these permissions when it starts.
+5. The line under Auto-fix should now say **Active**. Test it: on the English layout type `l;ylfu` and press Space; it becomes **สวัสดี**.
+
+**Still "Needs … permission"?** An entry left over from an older version can look switched on but not apply to the version you're running. In that list, select CursorLingo, click **−** to remove it, add it again with **+**, and reopen the app. If that doesn't help, clear the entries and let macOS ask again:
+
+```bash
+tccutil reset Accessibility io.github.cursorlingo
+```
+
+```bash
+tccutil reset ListenEvent io.github.cursorlingo
+```
+
+Then reopen CursorLingo and turn Auto-fix off and on.
+
+> **After every update** you need to repeat the first-launch step and remove/re-add CursorLingo in both permission lists. Each release has a new ad-hoc signature, so macOS treats it as a different app.
 
 ### Windows 10 / 11 (x64)
 
@@ -106,7 +131,7 @@ On a sample of real English and Thai words, correct text was wrongly changed in 
 **Privacy and permissions.**
 - Off by default. The keyboard hook / event tap only exists while the option is on.
 - Only the current and the last word are kept, in memory, plus the words you undid this session. Nothing is logged, stored or sent anywhere.
-- macOS asks for **Input Monitoring** and **Accessibility**. Secure input (password fields) and Terminal apps are skipped.
+- macOS needs **Input Monitoring** and **Accessibility** (see [Turn on Auto-fix on macOS](#turn-on-auto-fix-on-macos)). Secure input (password fields) and Terminal apps are skipped.
 - Windows needs no special rights, but cannot see windows running as administrator. Classic password boxes and consoles are skipped.
 - Only the stock US-English and Thai (Kedmanee) layouts are supported; other layouts are left alone.
 
