@@ -62,6 +62,8 @@
 git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo && ./install.sh
 ```
 
+ถ้าใน Keychain มีใบรับรอง *Developer ID Application* อยู่ `install.sh` จะใช้ใบนั้นเซ็นให้ macOS จะจำสิทธิ์ของ CursorLingo ไว้แม้ build ใหม่ ถ้าจะ notarize เอง ดูได้ที่ `macos/notarize.sh`
+
 #### เปิด Auto-fix บน macOS
 
 1. ที่เมนูบนแถบเมนู กด **Auto-fix wrong language (EN ⇄ TH)** บรรทัดใต้เมนูจะบอกว่ายังขาดสิทธิ์อะไร

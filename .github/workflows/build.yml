@@ -18,9 +18,46 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    env:
+      # Signing secrets exist only in the main repo; forks and PRs build ad-hoc.
+      HAS_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Import Developer ID certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -f pkcs12 -k "$KEYCHAIN" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          test -n "$IDENTITY" || { echo "No Developer ID Application identity in MACOS_CERT_P12" >&2; exit 1; }
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
       - run: ./macos/build.sh
+
+      - name: Notarize (release tags only)
+        if: env.HAS_SIGNING == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          export ASC_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$ASC_KEY_P8" > "$ASC_KEY_PATH"
+          ./macos/notarize.sh
+          rm "$ASC_KEY_PATH"
+
       - run: cd build && ditto -c -k --keepParent CursorLingo.app CursorLingo-macOS.zip
       - uses: actions/upload-artifact@v4
         with: { name: CursorLingo-macOS, path: build/CursorLingo-macOS.zip }

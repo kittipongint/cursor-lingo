@@ -1,6 +1,10 @@
 #!/bin/bash
 # Builds a universal (arm64 + x86_64) CursorLingo.app into ../build/
+#
+# Signing: ad-hoc by default. Set SIGN_IDENTITY to a "Developer ID Application: ..." identity to sign for
+# distribution (hardened runtime + secure timestamp, as notarization requires); then run notarize.sh.
 set -euo pipefail
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 cd "$(dirname "$0")"
 OUT="../build/CursorLingo.app"
 rm -rf "$OUT"
@@ -21,5 +25,10 @@ strip -x "$OUT/Contents/MacOS/CursorLingo"
 cp Info.plist "$OUT/Contents/Info.plist"
 [ -f ../assets/AppIcon.icns ] && cp ../assets/AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
 
-codesign --force --sign - "$OUT"   # ad-hoc signature
-echo "Built $OUT"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  codesign --force --sign - "$OUT"   # ad-hoc: runs locally, but every build is a "new app" to macOS
+else
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$OUT"
+  codesign --verify --strict --verbose=1 "$OUT"
+fi
+echo "Built $OUT (signed: $SIGN_IDENTITY)"

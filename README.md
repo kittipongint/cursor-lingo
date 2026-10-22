@@ -62,6 +62,8 @@ The badge needs no permissions. Input Monitoring and Accessibility are only need
 git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo && ./install.sh
 ```
 
+If your keychain has a *Developer ID Application* certificate, `install.sh` signs with it, so macOS keeps CursorLingo's permissions across rebuilds. To notarize a build yourself, see `macos/notarize.sh`.
+
 #### Turn on Auto-fix on macOS
 
 1. In the menu-bar menu, click **Auto-fix wrong language (EN ⇄ TH)**. The line under it shows what is still missing.
