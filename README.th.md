@@ -87,7 +87,12 @@ tccutil reset ListenEvent io.github.cursorlingo
 
 ถ้าอยากให้เปิดอัตโนมัติ คลิกขวาที่ไอคอนใน tray → **Start with Windows** (ถ้าย้ายไฟล์ exe ไปที่อื่น ระบบจะอัปเดต path ให้เอง)
 
-SmartScreen อาจเตือนว่าเป็นแอปที่ไม่ได้เซ็น ให้กด **More info → Run anyway**
+**คำเตือน SmartScreen:** ไฟล์ exe ยังไม่ได้เซ็น (code signing) Windows จึงอาจขึ้นว่า *"Windows protected your PC"* แก้ได้สองแบบ:
+
+- **ก่อนแตกไฟล์:** คลิกขวาที่ `CursorLingo-Windows-x64.zip` → **Properties** → ติ๊ก **Unblock** → **OK** แล้วค่อยแตกไฟล์ exe ที่ได้จะเปิดได้เลยโดยไม่มีคำเตือน
+- **หรือตอนที่คำเตือนขึ้น:** กด **More info → Run anyway** Windows จะจำไฟล์นี้ไว้ เปิดครั้งต่อไป (รวมถึงตอนเปิดพร้อม Windows) จะไม่ถามอีก
+
+SmartScreen มองแต่ละเวอร์ชันเป็นไฟล์ใหม่ จึงอาจเจอคำเตือนนี้หนึ่งครั้งทุกครั้งที่อัปเดต
 
 **หรือ build เอง** ด้วย Visual Studio 2022 หรือ Build Tools + CMake:
 

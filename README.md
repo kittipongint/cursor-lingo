@@ -86,7 +86,12 @@ Download `CursorLingo-Windows-x64.zip` from [Releases](https://github.com/kittip
 - **Per-user install** (like VS Code's user installer): in PowerShell run `.\install.ps1` (add `-Startup` to start with Windows). It copies the exe to `%LOCALAPPDATA%\Programs\CursorLingo` and adds a Start Menu shortcut. `.\install.ps1 -Uninstall` removes it.
 
 Right-click the tray icon → **Start with Windows** to launch it automatically (it follows the exe if you move it).
-SmartScreen may warn about an unsigned app: click **More info → Run anyway**.
+**SmartScreen warning.** The exe is not code-signed, so Windows may show *"Windows protected your PC"*. Either:
+
+- **Before extracting:** right-click `CursorLingo-Windows-x64.zip` → **Properties** → tick **Unblock** → **OK**, then extract. The exe inside opens without the warning.
+- **Or when it appears:** click **More info → Run anyway**. Windows remembers this for that file, so later launches (including *Start with Windows*) don't ask again.
+
+Each new version is a new file to SmartScreen, so expect this once per update.
 
 **Or build from source** with Visual Studio 2022 or Build Tools + CMake:
 
