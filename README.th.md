@@ -44,15 +44,7 @@
 
 ### macOS (12 Monterey ขึ้นไป ทั้ง Apple Silicon และ Intel)
 
-1. ดาวน์โหลด `CursorLingo-macOS.zip` จาก [Releases](https://github.com/kittipongint/cursor-lingo/releases) แตกไฟล์ แล้วย้าย **CursorLingo.app** ไปไว้ที่ **Applications**
-2. **เปิดครั้งแรก:** แอปเซ็นแบบ ad-hoc และยังไม่ได้ผ่าน notarization ของ Apple macOS จึงขึ้นว่า *"CursorLingo" Not Opened – Apple could not verify…* ให้กด **Done** (อย่ากด *Move to Trash*) แล้วเลือกทำอย่างใดอย่างหนึ่ง:
-   - รันคำสั่งนี้ใน Terminal ครั้งเดียว แล้วเปิดแอปตามปกติ:
-     ```bash
-     xattr -dr com.apple.quarantine /Applications/CursorLingo.app
-     ```
-   - หรือเปิด **System Settings → Privacy & Security** เลื่อนลงไปที่ **Security** แล้วกด **Open Anyway** ข้างข้อความ *"CursorLingo" was blocked*
-
-   macOS รุ่นใหม่ไม่ยอมให้ผ่านด้วยการคลิกขวา → Open แล้ว
+ดาวน์โหลด `CursorLingo-macOS.zip` จาก [Releases](https://github.com/kittipongint/cursor-lingo/releases) แตกไฟล์ ย้าย **CursorLingo.app** ไปไว้ที่ **Applications** แล้วดับเบิลคลิกเปิดได้เลย ตั้งแต่ v1.1.4 แอปเซ็นด้วย Developer ID และผ่าน notarization ของ Apple แล้ว จึงเปิดได้โดยไม่มีคำเตือน
 
 ถ้าใช้แค่ป้ายภาษา ไม่ต้องให้สิทธิ์อะไรเพิ่ม สิทธิ์ Input Monitoring และ Accessibility ใช้เฉพาะ [Auto-fix](#เปิด-auto-fix-บน-macos)
 
@@ -72,7 +64,9 @@ git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo &&
 4. **Quit CursorLingo แล้วเปิดใหม่** เพราะแอปอ่านสิทธิ์ตอนเริ่มทำงาน
 5. บรรทัดใต้ Auto-fix ควรขึ้นว่า **Active** ลองทดสอบโดยเปลี่ยนแป้นเป็นอังกฤษ พิมพ์ `l;ylfu` แล้วกด Space ควรได้ **สวัสดี**
 
-**ยังขึ้นว่า "Needs … permission" อยู่?** รายการ CursorLingo ที่ค้างมาจากเวอร์ชันเก่าอาจดูเหมือนเปิดไว้ แต่ไม่มีผลกับเวอร์ชันที่ใช้อยู่ ให้เลือก CursorLingo ในรายการ กด **−** เพื่อลบ แล้วกด **+** เพิ่มใหม่ และเปิดแอปใหม่ ถ้ายังไม่ได้ ให้ล้างรายการเก่าแล้วให้ macOS ถามใหม่:
+ทำแค่ครั้งเดียว อัปเดตเวอร์ชันต่อๆ ไป macOS จะจำสิทธิ์ไว้ให้
+
+**อัปเดตมาจาก v1.1.3 หรือเก่ากว่า?** เวอร์ชันเก่าเซ็นแบบ ad-hoc macOS จึงมองว่า v1.1.4 เป็นแอปใหม่ ต้องให้สิทธิ์อีกครั้งเป็นครั้งสุดท้าย: ใน **Input Monitoring** และ **Accessibility** ให้เลือก CursorLingo ตัวเก่า กด **−** แล้วกด **+** เพิ่มตัวใหม่ และเปิดแอปใหม่ ถ้ายังขึ้นว่า *Needs … permission* ให้ล้างรายการเก่าแล้วให้ macOS ถามใหม่:
 
 ```bash
 tccutil reset Accessibility io.github.cursorlingo
@@ -82,9 +76,7 @@ tccutil reset Accessibility io.github.cursorlingo
 tccutil reset ListenEvent io.github.cursorlingo
 ```
 
-จากนั้นเปิด CursorLingo ใหม่ แล้วปิดและเปิด Auto-fix อีกครั้ง
-
-> **ทุกครั้งที่อัปเดตเวอร์ชัน** ต้องทำขั้นตอน "เปิดครั้งแรก" ใหม่ และลบแล้วเพิ่ม CursorLingo ในรายการสิทธิ์ทั้งสองอีกครั้ง เพราะแต่ละเวอร์ชันมีลายเซ็น ad-hoc ใหม่ macOS จึงมองเป็นแอปคนละตัว
+จากนั้นเปิด CursorLingo ใหม่ แล้วปิดและเปิด Auto-fix อีกครั้ง (ถ้า build เองแบบ ad-hoc จะเป็นเหมือนเวอร์ชันเก่า คือ macOS จะถามสิทธิ์ใหม่ทุกครั้งที่ build)
 
 ### Windows 10 / 11 (x64)
 

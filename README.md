@@ -44,15 +44,7 @@ The Windows tray icon itself shows the current language code. The badge also hid
 
 ### macOS (12 Monterey or later, Apple Silicon and Intel)
 
-1. Download `CursorLingo-macOS.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, and move **CursorLingo.app** to **Applications**.
-2. **First launch.** The app is ad-hoc signed, not notarized by Apple, so macOS says *"CursorLingo" Not Opened – Apple could not verify…*. Click **Done** (not *Move to Trash*), then either:
-   - run this once in Terminal, then open the app normally:
-     ```bash
-     xattr -dr com.apple.quarantine /Applications/CursorLingo.app
-     ```
-   - or open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to *"CursorLingo" was blocked*.
-
-   On recent macOS, right-click → Open no longer gets past this check.
+Download `CursorLingo-macOS.zip` from [Releases](https://github.com/kittipongint/cursor-lingo/releases), unzip it, move **CursorLingo.app** to **Applications**, and double-click it. Releases from v1.1.4 on are signed with a Developer ID and notarized by Apple, so they open without warnings.
 
 The badge needs no permissions. Input Monitoring and Accessibility are only needed for [Auto-fix](#turn-on-auto-fix-on-macos).
 
@@ -72,7 +64,9 @@ If your keychain has a *Developer ID Application* certificate, `install.sh` sign
 4. **Quit CursorLingo and open it again.** The app reads these permissions when it starts.
 5. The line under Auto-fix should now say **Active**. Test it: on the English layout type `l;ylfu` and press Space; it becomes **สวัสดี**.
 
-**Still "Needs … permission"?** An entry left over from an older version can look switched on but not apply to the version you're running. In that list, select CursorLingo, click **−** to remove it, add it again with **+**, and reopen the app. If that doesn't help, clear the entries and let macOS ask again:
+You only do this once: updates keep the permissions.
+
+**Upgrading from v1.1.3 or older?** Those builds were only ad-hoc signed, so macOS treats v1.1.4 as a new app. Grant the permissions one last time: in both **Input Monitoring** and **Accessibility**, select the old CursorLingo, click **−**, add the new one with **+**, and reopen the app. If it still says *Needs … permission*, clear the old entries and let macOS ask again:
 
 ```bash
 tccutil reset Accessibility io.github.cursorlingo
@@ -82,9 +76,7 @@ tccutil reset Accessibility io.github.cursorlingo
 tccutil reset ListenEvent io.github.cursorlingo
 ```
 
-Then reopen CursorLingo and turn Auto-fix off and on.
-
-> **After every update** you need to repeat the first-launch step and remove/re-add CursorLingo in both permission lists. Each release has a new ad-hoc signature, so macOS treats it as a different app.
+Then reopen CursorLingo and turn Auto-fix off and on. (Builds from source signed ad-hoc behave like the old releases: macOS asks again after every rebuild.)
 
 ### Windows 10 / 11 (x64)
 
