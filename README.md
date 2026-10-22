@@ -5,6 +5,10 @@
 <h1 align="center">CursorLingo</h1>
 
 <p align="center">
+  <b>English</b> · <a href="README.th.md">ภาษาไทย</a>
+</p>
+
+<p align="center">
   See your current keyboard language <b>right at the mouse pointer</b>, so you never type a whole sentence in the wrong language again.<br>
   Tiny, native, and private. Runs on <b>macOS</b> and <b>Windows</b>.
 </p>
@@ -22,7 +26,7 @@
 - **Launch at login / Start with Windows**, toggled from the menu.
 - **Click-through.** The badge never steals clicks or focus.
 - **Auto-fix wrong language (optional, off by default).** Typed `l;ylfu;yoouhgik` instead of `สวัสดีวันนี้เรา`, or `ะ้รห` instead of `this`? CursorLingo re-types the word and switches the layout for you. English ⇄ Thai. See [Auto-fix](#auto-fix-wrong-language).
-- **Private.** No network, no telemetry. Keystrokes are only observed if you turn Auto-fix on, and then only the current word is kept in memory.
+- **Private.** No network, no telemetry. Keystrokes are only observed if you turn Auto-fix on, and then only the current and the last word are kept in memory.
 - **Light on resources.** It's event-driven, with no polling timers on macOS.
 
 |                  | macOS                                  | Windows                                        |
@@ -53,7 +57,7 @@ xattr -dr com.apple.quarantine /Applications/CursorLingo.app
 git clone https://github.com/kittipongint/cursor-lingo.git && cd cursor-lingo && ./install.sh
 ```
 
-No Accessibility or Input Monitoring permission is needed.
+The badge needs no permissions. Input Monitoring and Accessibility are only requested if you turn on Auto-fix.
 
 ### Windows 10 / 11 (x64)
 
@@ -95,7 +99,7 @@ Turn on **Auto-fix wrong language (EN ⇄ TH)** from the menu. When you finish a
 1. the reading on screen is implausible for its language, and
 2. the other reading is plausible for its language.
 
-*English plausibility* uses a letter-trigram model (real words are cheap; Thai typed on a Latin layout is full of impossible sequences and punctuation keys such as `; ' , .` inside words). *Thai plausibility* uses Thai orthography: a word can't start with a tone mark or trailing vowel, vowels sit on consonants, a leading vowel needs a consonant after it, and so on. English typed on the Thai layout breaks these rules almost immediately. Short words (under 3 keys), numbers, paths, URLs, e-mail addresses and code-like words are never touched, because precision matters more than recall.
+*English plausibility* uses a letter-trigram model (real words are cheap; Thai typed on a Latin layout is full of impossible sequences and punctuation keys such as `; ' , .` inside words). *Thai plausibility* uses Thai orthography: a word can't start with a tone mark or trailing vowel, vowels sit on consonants, a leading vowel needs a consonant after it, and so on. English typed on the Thai layout breaks these rules almost immediately. Very short words, numbers, paths, URLs, e-mail addresses and code-like words are never touched, because precision matters more than recall.
 
 On a sample of real English and Thai words, correct text was wrongly changed in fewer than 1 in 1,000 cases, and about 80 % of wrong-layout words were fixed. Words it is unsure about are left alone.
 
