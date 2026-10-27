@@ -1,0 +1,72 @@
+# Real-world cases for the wrong-layout detector. Run by tests/layoutfix_test.cpp.
+#
+#   <layout on screen: en|th> TAB <text exactly as it appeared> TAB <fix|keep>
+#
+# fix  = this was typed in the wrong layout and should be converted at Space
+# keep = this is what the writer meant and must never change
+#
+# Found a wrong or missed fix? Add a line here (check it with: /tmp/lf_test en "text"), then open a PR.
+# Precision comes first: a "keep" case that fails is a bug; a "fix" case may need tuning in core/layoutfix.h.
+
+# Thai typed on the English layout
+en	l;ylfu	fix
+en	-v[86I	fix
+en	xit=6,	fix
+en	ri6j'ouh	fix
+en	4kKkwmp	fix
+en	gfuJp;	fix
+en	wfhg]p	fix
+en	w,jgxHowi	fix
+en	Fxicdi,	fix
+en	8iy[	fix
+
+# Thai words that are also plausible English keys: left to double Shift
+en	muj	keep
+
+# English typed on the Thai layout
+th	ะ้รห	fix
+th	้ำสสน	fix
+th	ทำำะรืเ	fix
+th	ะนทนพพนไ	fix
+th	ดีืแะรนื	fix
+th	ิำแฟีหำ	fix
+
+# Correct English
+en	hello	keep
+en	meeting	keep
+en	tomorrow	keep
+en	because	keep
+en	people	keep
+en	JSON	keep
+en	iPhone	keep
+en	GitHub	keep
+en	don't	keep
+en	e.g.	keep
+en	v1.1.4	keep
+en	README.md	keep
+en	https://example.com	keep
+en	user@example.com	keep
+en	snake_case	keep
+en	camelCase	keep
+en	#hashtag	keep
+en	@mention	keep
+en	3.14	keep
+en	50%	keep
+en	C++	keep
+en	ok	keep
+en	lol	keep
+en	xD	keep
+
+# Correct Thai
+th	สวัสดี	keep
+th	ขอบคุณ	keep
+th	ประชุม	keep
+th	พรุ่งนี้	keep
+th	ภาษาไทย	keep
+th	เดี๋ยว	keep
+th	ได้เลย	keep
+th	ไม่เป็นไร	keep
+th	โปรแกรม	keep
+th	ครับ	keep
+th	ค่ะ	keep
+th	ๆ	keep
