@@ -30,6 +30,8 @@
 #include <uiautomation.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <winver.h>
 #include <algorithm>
 #include <cmath>
@@ -1831,6 +1833,109 @@ static HFONT g_fontText, g_fontBold, g_fontHead;
 static bool g_setActive = false, g_keysPaused = false, g_reloadPosted = false;
 static wchar_t g_keyStatus[128];  // the last shortcut problem, shown under the tools
 
+// The look of the Settings window: Windows 11's light or dark colours (following "app mode" in Windows), or the system
+// colours under high contrast. Each section sits on a rounded card, and the controls are drawn to match.
+struct SetTheme {
+    bool dark = false, contrast = false;
+    COLORREF back, card, cardLine, text, sub, dim, accent, onAccent, control, controlHot, controlDown, controlLine, strong,
+        field, knob, tabHot, status;
+    HBRUSH backBrush = nullptr, cardBrush = nullptr;
+};
+static SetTheme g_th;
+static std::vector<std::pair<int, int>> g_cards;  // the open page's cards: top and bottom, in 96-dpi units
+static HFONT g_fontIcon;                          // Segoe Fluent Icons (or MDL2 Assets), for the check mark
+static int g_tabHot = -1;                         // the tab under the pointer
+
+static int SetPx(int v) { return MulDiv(v, (int)g_setDpi, 96); }
+
+static COLORREF Mix(COLORREF a, COLORREF b, float t) {
+    auto ch = [t](int x, int y) { return (BYTE)std::lround(x + (y - x) * t); };
+    return RGB(ch(GetRValue(a), GetRValue(b)), ch(GetGValue(a), GetGValue(b)), ch(GetBValue(a), GetBValue(b)));
+}
+
+static void LoadTheme() {
+    SetTheme& t = g_th;
+    HIGHCONTRASTW hc = {sizeof(hc)};
+    SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0);
+    t.contrast = (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    DWORD light = 1, accent = 0, cb = sizeof(light);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"AppsUseLightTheme",
+                 RRF_RT_REG_DWORD, nullptr, &light, &cb);
+    t.dark = !t.contrast && light == 0;
+    cb = sizeof(accent);
+    // Stored as 0xAABBGGRR: the same byte order as a COLORREF.
+    const COLORREF base = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", L"AccentColor", RRF_RT_REG_DWORD,
+                                       nullptr, &accent, &cb) == ERROR_SUCCESS
+                              ? accent & 0xFFFFFF
+                              : RGB(0x00, 0x78, 0xD4);
+    if (t.contrast) {
+        t.back = t.card = t.control = t.controlHot = t.controlDown = t.field = t.knob = t.tabHot = GetSysColor(COLOR_WINDOW);
+        t.text = t.sub = t.status = t.cardLine = t.controlLine = t.strong = GetSysColor(COLOR_WINDOWTEXT);
+        t.dim = GetSysColor(COLOR_GRAYTEXT);
+        t.accent = GetSysColor(COLOR_HIGHLIGHT);
+        t.onAccent = GetSysColor(COLOR_HIGHLIGHTTEXT);
+    } else if (t.dark) {
+        t.back = RGB(0x20, 0x20, 0x20), t.card = RGB(0x2B, 0x2B, 0x2B), t.cardLine = RGB(0x33, 0x33, 0x33);
+        t.text = RGB(0xFF, 0xFF, 0xFF), t.sub = RGB(0xB4, 0xB4, 0xB4), t.dim = RGB(0x70, 0x70, 0x70);
+        t.accent = Mix(base, RGB(0xFF, 0xFF, 0xFF), 0.45f), t.onAccent = RGB(0, 0, 0);
+        t.control = RGB(0x37, 0x37, 0x37), t.controlHot = RGB(0x3D, 0x3D, 0x3D), t.controlDown = RGB(0x30, 0x30, 0x30);
+        t.controlLine = RGB(0x46, 0x46, 0x46), t.strong = RGB(0x9E, 0x9E, 0x9E), t.field = RGB(0x1E, 0x1E, 0x1E);
+        t.knob = RGB(0x45, 0x45, 0x45), t.tabHot = RGB(0x2D, 0x2D, 0x2D), t.status = RGB(0xFF, 0x99, 0xA4);
+    } else {
+        t.back = RGB(0xF3, 0xF3, 0xF3), t.card = RGB(0xFF, 0xFF, 0xFF), t.cardLine = RGB(0xE5, 0xE5, 0xE5);
+        t.text = RGB(0x1A, 0x1A, 0x1A), t.sub = RGB(0x5F, 0x5F, 0x5F), t.dim = RGB(0xA0, 0xA0, 0xA0);
+        t.accent = Mix(base, RGB(0, 0, 0), 0.1f), t.onAccent = RGB(0xFF, 0xFF, 0xFF);
+        t.control = RGB(0xFB, 0xFB, 0xFB), t.controlHot = RGB(0xF3, 0xF3, 0xF3), t.controlDown = RGB(0xEC, 0xEC, 0xEC);
+        t.controlLine = RGB(0xD6, 0xD6, 0xD6), t.strong = RGB(0x85, 0x85, 0x85), t.field = RGB(0xFF, 0xFF, 0xFF);
+        t.knob = RGB(0xFF, 0xFF, 0xFF), t.tabHot = RGB(0xE9, 0xE9, 0xE9), t.status = RGB(0xC4, 0x2B, 0x1C);
+    }
+    for (HBRUSH* b : {&t.backBrush, &t.cardBrush})
+        if (*b) DeleteObject(*b);
+    t.backBrush = CreateSolidBrush(t.back);
+    t.cardBrush = CreateSolidBrush(t.card);
+}
+
+// A rounded rectangle with a smooth edge, blended onto `dc`: filled with `fill` and outlined `edge` pixels wide in
+// `line`. Either may be CLR_NONE.
+static void FillRound(HDC dc, RECT r, float radius, COLORREF fill, COLORREF line = CLR_NONE, float edge = 1) {
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    Bitmap b;
+    if (w <= 0 || h <= 0 || !b.Create(w, h)) return;
+    const bool hasFill = fill != CLR_NONE, hasLine = line != CLR_NONE;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const float d = SdRoundRect(x + 0.5f, y + 0.5f, w / 2.0f, h / 2.0f, w / 2.0f, h / 2.0f, radius);
+            const float out = Clamp01(0.5f - d), in = !hasLine ? out : hasFill ? Clamp01(0.5f - d - edge) : 0;
+            const float a = hasFill ? out : out - Clamp01(0.5f - d - edge), ln = hasFill ? out - in : a;
+            auto ch = [&](int f, int l) { return (DWORD)std::lround((hasFill ? f * in : 0) + (hasLine ? l * ln : 0)); };
+            b.px[y * w + x] = (DWORD)std::lround(a * 255) << 24 | ch(GetRValue(fill), GetRValue(line)) << 16 |
+                              ch(GetGValue(fill), GetGValue(line)) << 8 | ch(GetBValue(fill), GetBValue(line));
+        }
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    AlphaBlend(dc, r.left, r.top, w, h, b.dc, 0, 0, w, h, bf);
+}
+
+static int CALLBACK FoundFont(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM found) {
+    *(bool*)found = true;
+    return 0;
+}
+
+static bool FontExists(const wchar_t* face) {
+    LOGFONTW lf = {};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcsncpy(lf.lfFaceName, face, LF_FACESIZE - 1);
+    bool found = false;
+    HDC dc = GetDC(nullptr);
+    EnumFontFamiliesExW(dc, &lf, FoundFont, (LPARAM)&found, 0);
+    ReleaseDC(nullptr, dc);
+    return found;
+}
+
+// Keyboard cues (focus rings) show once the keyboard is used in the window, as elsewhere in Windows.
+static bool CuesHidden(HWND h) { return (SendMessageW(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) != 0; }
+
+static void FocusRing(HDC dc, RECT r) { FillRound(dc, r, 4 * DpiScaleOf(g_setDpi), CLR_NONE, g_th.text, 1.5f * DpiScaleOf(g_setDpi)); }
+
 // The keyboards added in Windows, one row per language code.
 struct LangRow {
     wchar_t code[4];
@@ -1941,7 +2046,7 @@ static void SettingsReload(int tab) {
 }
 
 static void DeleteFonts() {
-    for (HFONT* f : {&g_fontText, &g_fontBold, &g_fontHead}) {
+    for (HFONT* f : {&g_fontText, &g_fontBold, &g_fontHead, &g_fontIcon}) {
         if (*f) DeleteObject(*f);
         *f = nullptr;
     }
@@ -1952,11 +2057,20 @@ static void MakeFonts() {
     NONCLIENTMETRICSW ncm = {sizeof(ncm)};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, g_setDpi);
     LOGFONTW lf = ncm.lfMessageFont;
+    const bool variable = FontExists(L"Segoe UI Variable Text");  // Windows 11's UI font
+    if (variable) wcscpy(lf.lfFaceName, L"Segoe UI Variable Text");
     g_fontText = CreateFontIndirectW(&lf);
     lf.lfWeight = FW_SEMIBOLD;
     g_fontBold = CreateFontIndirectW(&lf);
     lf.lfHeight = lf.lfHeight * 6 / 5;
+    if (variable) wcscpy(lf.lfFaceName, L"Segoe UI Variable Display");
     g_fontHead = CreateFontIndirectW(&lf);
+    LOGFONTW icon = {};
+    icon.lfHeight = -SetPx(12);
+    icon.lfCharSet = DEFAULT_CHARSET;
+    icon.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy(icon.lfFaceName, FontExists(L"Segoe Fluent Icons") ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets");
+    g_fontIcon = CreateFontIndirectW(&icon);
 }
 
 static COLORREF ToRef(Rgb c) { return RGB(std::lround(c.r * 255), std::lround(c.g * 255), std::lround(c.b * 255)); }
@@ -1964,8 +2078,13 @@ static COLORREF ToRef(Rgb c) { return RGB(std::lround(c.r * 255), std::lround(c.
 // Puts controls on the page from top to bottom; `y` is where the next one goes.
 struct Page {
     HWND wnd;
-    int y = 16;
     static const int L = 20, W = 480;  // left margin and content width
+    static const int Indent = 26;      // text under a check box or radio button lines up with its title
+    static const int CardTop = 8, Pad = 14, Gap = 12;  // cards: first top, inner padding, space between
+    int cardTop = CardTop, y = CardTop + Pad;
+
+    explicit Page(HWND w) : wnd(w) { g_cards.clear(); }
+    void EndCard() { g_cards.push_back({cardTop, y + Pad}); }
 
     int Px(int v) const { return MulDiv(v, (int)g_setDpi, 96); }
     HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int top, int w, int h, int id, HFONT font = g_fontText) {
@@ -1991,10 +2110,11 @@ struct Page {
     }
     void Header(const wchar_t* text) { y += Text(text, L, y, W, g_fontHead) + 4; }
     void Caption(const wchar_t* text, int x = L, int w = W) { y += Text(text, x, y, w, g_fontText, CTL_CAPTION); }
+    // Ends this section's card and starts the next.
     void Separator() {
-        y += 10;
-        Add(L"STATIC", L"", SS_ETCHEDHORZ, L, y, W, 2, 0);
-        y += 12;
+        EndCard();
+        cardTop = y + Pad + Gap;
+        y = cardTop + Pad;
     }
     HWND Check(const wchar_t* title, bool on, int id, int w = W, bool enabled = true) {
         HWND c = Add(L"BUTTON", title, BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP, L, y, w, 22, id);
@@ -2006,7 +2126,7 @@ struct Page {
     // A switch with its explanation under it.
     void Option(const wchar_t* title, const wchar_t* detail, bool on, int id, bool enabled = true) {
         Check(title, on, id, W, enabled);
-        Caption(detail, L + 20, W - 20);
+        Caption(detail, L + Indent, W - Indent);
         y += 10;
     }
     // A title and explanation on the left, a button on the right.
@@ -2079,7 +2199,7 @@ static void BuildFixTab(Page& p) {
                        22, CTL_FIX_BASE + i);
         SendMessageW(r, BM_SETCHECK, mode == i ? BST_CHECKED : BST_UNCHECKED, 0);
         p.y += 22;
-        p.Caption(details[i], Page::L + 20, Page::W - 20);
+        p.Caption(details[i], Page::L + Page::Indent, Page::W - Page::Indent);
         p.y += 8;
     }
     p.Separator();
@@ -2126,12 +2246,12 @@ static void BuildPresentTab(Page& p) {
     for (int i = 0; i < 3; i++) {
         int top = p.y;
         p.Check(kToolNames[th][i], on[i], CTL_TOOL_BASE + i, 300);
-        p.Caption(details[i], Page::L + 20, 300);
-        HWND key = p.Add(HOTKEY_CLASSW, L"", WS_TABSTOP | WS_BORDER, 350, top, 150, 26, CTL_KEY_BASE + i);
+        p.Caption(details[i], Page::L + Page::Indent, 300 - Page::Indent);
+        HWND key = p.Add(HOTKEY_CLASSW, L"", WS_TABSTOP, 350, top, 150, 28, CTL_KEY_BASE + i);
         // Keys without Ctrl or Alt would take plain typing: the control turns them into Ctrl+Alt+key.
         SendMessageW(key, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
         SendMessageW(key, HKM_SETHOTKEY, *ToolKey(i), 0);
-        p.y = std::max(p.y, top + 26) + 12;
+        p.y = std::max(p.y, top + 28) + 12;
     }
     p.Add(L"STATIC", g_keyStatus, SS_NOPREFIX | SS_CENTERIMAGE, Page::L, p.y, 320, 28, CTL_STATUS);
     p.Add(L"BUTTON", TR(L"Restore defaults", L"คืนค่าคีย์ลัดเริ่มต้น"), WS_TABSTOP, 350, p.y, 150, 28, CTL_RESTORE);
@@ -2159,7 +2279,7 @@ static void BuildPresentTab(Page& p) {
     p.y += 4;
     const wchar_t* legend[][2] = {
         {TR(L"Ctrl+Alt + wheel", L"Ctrl+Alt + ล้อเมาส์"), TR(L"Resize the circle", L"ปรับขนาดวง")},
-        {L"Ctrl+Alt+=   Ctrl+Alt+\u2212", TR(L"Zoom in / out", L"ซูมเข้า / ออก")},
+        {L"Ctrl+Alt+= / \u2212", TR(L"Zoom in / out", L"ซูมเข้า / ออก")},
         {L"Ctrl+Z", TR(L"Take back the last stroke", L"ลบเส้นที่วาดล่าสุด")},
         {L"Esc", TR(L"Stop drawing; press again to turn everything off", L"เลิกวาด กดอีกครั้งเพื่อปิดทั้งหมด")},
         {TR(L"Click", L"คลิก"), TR(L"A ring in the colour of the language in use", L"มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")},
@@ -2181,8 +2301,8 @@ static void BuildGeneralTab(Page& p) {
              version);
     int top = p.y + 4;
     top += p.Text(kAppName, 84, top, 416, g_fontHead) + 2;
-    p.Text(about, 84, top, 416, g_fontText, CTL_CAPTION);
-    p.y += 48;
+    top += p.Text(about, 84, top, 416, g_fontText, CTL_CAPTION);
+    p.y = std::max(p.y + 48, top);  // the about line wraps at larger text sizes
     p.Separator();
 
     if (IsPackaged()) {  // switched in Windows Settings; the app cannot tell whether it is on
@@ -2254,6 +2374,8 @@ static void ApplyKeyBoxes() {
     }
 }
 
+static void StylePageControls();
+
 // Builds the open tab's page and fits the window around it.
 static void BuildPage() {
     ApplyKeyBoxes();
@@ -2262,8 +2384,8 @@ static void BuildPage() {
     if (g_setPage && focus && GetParent(focus) == g_setPage) focusId = GetDlgCtrlID(focus);
     SendMessageW(g_setWnd, WM_SETREDRAW, FALSE, 0);
     if (g_setPage) DestroyWindow(g_setPage);
-    g_setPage = CreateWindowExW(WS_EX_CONTROLPARENT, L"CursorLingoPage", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 1, 1,
-                                g_setWnd, nullptr, g_inst, nullptr);
+    g_setPage = CreateWindowExW(WS_EX_CONTROLPARENT, L"CursorLingoPage", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                                0, 0, 1, 1, g_setWnd, nullptr, g_inst, nullptr);
     Page p{g_setPage};
     switch (g_setTab) {
         case TAB_BADGE: BuildBadgeTab(p); break;
@@ -2271,16 +2393,17 @@ static void BuildPage() {
         case TAB_PRESENT: BuildPresentTab(p); ShowSliderValues(); break;
         default: BuildGeneralTab(p); break;
     }
-    // The tab control goes round the page; the window round the tab control.
-    RECT page = {0, 0, p.Px(520), p.Px(p.y + 20)}, tabs = page;
-    TabCtrl_AdjustRect(g_setTabs, TRUE, &tabs);
-    const int dx = p.Px(10) - tabs.left, dy = p.Px(10) - tabs.top;
-    OffsetRect(&page, dx, dy);
-    OffsetRect(&tabs, dx, dy);
-    MoveWindow(g_setTabs, tabs.left, tabs.top, tabs.right - tabs.left, tabs.bottom - tabs.top, FALSE);
-    MoveWindow(g_setPage, page.left, page.top, page.right - page.left, page.bottom - page.top, FALSE);
+    p.EndCard();
+    StylePageControls();
+    // The tab strip on top, the page of cards under it, the window round both.
+    RECT item = {};
+    TabCtrl_GetItemRect(g_setTabs, 0, &item);
+    const int edge = p.Px(6), width = p.Px(520), tabsHeight = item.bottom - item.top + p.Px(10);
+    const int pageTop = p.Px(6) + tabsHeight, pageHeight = p.Px(p.y + Page::Pad + 8);
+    MoveWindow(g_setTabs, edge + p.Px(6), p.Px(6), width - p.Px(12), tabsHeight, FALSE);
+    SetWindowPos(g_setPage, HWND_TOP, edge, pageTop, width, pageHeight, SWP_NOACTIVATE | SWP_NOREDRAW);
     const DWORD style = GetWindowLongW(g_setWnd, GWL_STYLE), ex = GetWindowLongW(g_setWnd, GWL_EXSTYLE);
-    RECT frame = {0, 0, tabs.right + p.Px(10), tabs.bottom + p.Px(10)};
+    RECT frame = {0, 0, edge * 2 + width, pageTop + pageHeight + edge};
     AdjustWindowRectExForDpi(&frame, style, FALSE, ex, g_setDpi);
     SetWindowPos(g_setWnd, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2295,7 +2418,7 @@ static void DrawPreview(HDC dc, RECT r) {
     const int w = r.right - r.left, h = r.bottom - r.top;
     Bitmap canvas;
     if (!canvas.Create(w, h)) return;
-    const COLORREF bg = GetSysColor(COLOR_WINDOW);
+    const COLORREF bg = g_th.card;
     const Rgb back = {GetRValue(bg) / 255.0f, GetGValue(bg) / 255.0f, GetBValue(bg) / 255.0f};
     const Rgb a = {0.36f, 0.46f, 0.68f}, b = {0.64f, 0.52f, 0.74f};
     const float radius = 10 * DpiScaleOf(g_setDpi);
@@ -2325,16 +2448,10 @@ static void DrawPreview(HDC dc, RECT r) {
 
 // The PromptPay QR code: whole pixels per module, centred on a white card with a quiet zone round it.
 static void DrawPromptPayQr(HDC dc, RECT r) {
-    FillRect(dc, &r, GetSysColorBrush(COLOR_WINDOW));
+    FillRect(dc, &r, g_th.cardBrush);
     const int n = (int)(sizeof(kPromptPayQr) / sizeof(kPromptPayQr[0])), side = std::min(r.right - r.left, r.bottom - r.top);
     const int module = std::max(1, side / (n + 4)), size = module * n;
-    HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
-    HGDIOBJ oldBrush = SelectObject(dc, white), oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    const int round = MulDiv(10, (int)g_setDpi, 96);
-    RoundRect(dc, r.left, r.top, r.left + side + 1, r.top + side + 1, round, round);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(white);
+    FillRound(dc, {r.left, r.top, r.left + side, r.top + side}, 10 * DpiScaleOf(g_setDpi), RGB(255, 255, 255), g_th.cardLine);
     const int x0 = r.left + (side - size) / 2, y0 = r.top + (side - size) / 2;
     HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
     for (int y = 0; y < n; y++)
@@ -2362,17 +2479,262 @@ static void CopyPromptPay(HWND button) {
 static void DrawSwatch(const DRAWITEMSTRUCT* d, const wchar_t* code) {
     HDC dc = d->hDC;
     RECT r = d->rcItem;
-    FillRect(dc, &r, GetSysColorBrush(COLOR_WINDOW));
-    const int round = MulDiv(8, (int)g_setDpi, 96);
-    HBRUSH fill = CreateSolidBrush(ToRef(AccentFor(code)));
-    HPEN pen = CreatePen(PS_SOLID, 1, GetSysColor(d->itemState & ODS_FOCUS ? COLOR_HIGHLIGHT : COLOR_BTNSHADOW));
-    HGDIOBJ oldBrush = SelectObject(dc, fill), oldPen = SelectObject(dc, pen);
-    InflateRect(&r, -1, -1);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, round, round);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
-    DeleteObject(fill);
-    DeleteObject(pen);
+    FillRect(dc, &r, g_th.cardBrush);
+    const float s = DpiScaleOf(g_setDpi);
+    if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) FocusRing(dc, r);
+    InflateRect(&r, -SetPx(3), -SetPx(3));
+    // The edge is the colour itself, nudged away from the card, so every colour keeps an outline.
+    const COLORREF fill = ToRef(AccentFor(code));
+    FillRound(dc, r, 4 * s, fill, Mix(fill, g_th.dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0, 0, 0), 0.18f));
+}
+
+// Push buttons, check boxes and radio buttons in the Windows 11 style, drawn on the card.
+static LRESULT DrawButton(const NMCUSTOMDRAW* cd) {
+    HWND b = cd->hdr.hwndFrom;
+    const LONG type = GetWindowLongW(b, GWL_STYLE) & BS_TYPEMASK;
+    if (cd->dwDrawStage != CDDS_PREPAINT || type == BS_OWNERDRAW) return CDRF_DODEFAULT;
+    HDC dc = cd->hdc;
+    RECT r = cd->rc;
+    const LRESULT state = SendMessageW(b, BM_GETSTATE, 0, 0);
+    const bool enabled = IsWindowEnabled(b), hot = enabled && (cd->uItemState & CDIS_HOT), down = enabled && (state & BST_PUSHED);
+    const bool focus = GetFocus() == b && !CuesHidden(b);
+    const float s = DpiScaleOf(g_setDpi);
+    wchar_t text[128];
+    GetWindowTextW(b, text, 128);
+    FillRect(dc, &r, g_th.cardBrush);
+    SetBkMode(dc, TRANSPARENT);
+    HFONT font = (HFONT)SendMessageW(b, WM_GETFONT, 0, 0);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    if (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON) {
+        FillRound(dc, r, 4 * s, down ? g_th.controlDown : hot ? g_th.controlHot : g_th.control, g_th.controlLine);
+        SetTextColor(dc, !enabled ? g_th.dim : down ? g_th.sub : g_th.text);
+        DrawTextW(dc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_HIDEPREFIX);
+        if (focus) FocusRing(dc, r);
+    } else {
+        const bool radio = type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON, on = (state & BST_CHECKED) != 0;
+        const int side = SetPx(18), top = (r.top + r.bottom - side) / 2;
+        RECT box = {r.left + SetPx(1), top, r.left + SetPx(1) + side, top + side};
+        const float round = radio ? side / 2.0f : 4 * s;
+        if (on) {
+            const COLORREF fill = !enabled ? g_th.dim : hot ? Mix(g_th.accent, g_th.card, 0.12f) : g_th.accent;
+            FillRound(dc, box, round, fill);
+            if (radio) {
+                RECT dot = box;
+                InflateRect(&dot, -SetPx(hot ? 4 : 5), -SetPx(hot ? 4 : 5));
+                FillRound(dc, dot, (dot.right - dot.left) / 2.0f, g_th.onAccent);
+            } else {
+                SelectObject(dc, g_fontIcon);
+                SetTextColor(dc, g_th.onAccent);
+                DrawTextW(dc, L"", 1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);  // CheckMark
+                SelectObject(dc, font);
+            }
+        } else {
+            FillRound(dc, box, round, hot ? g_th.controlHot : g_th.control, enabled ? g_th.strong : g_th.dim);
+        }
+        RECT t = r;
+        t.left = box.right + SetPx(8);
+        int right = box.right + SetPx(2);
+        if (text[0]) {
+            SetTextColor(dc, enabled ? g_th.text : g_th.dim);
+            DrawTextW(dc, text, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_HIDEPREFIX | DT_END_ELLIPSIS);
+            RECT m = t;
+            DrawTextW(dc, text, -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_HIDEPREFIX);
+            right = std::min((int)r.right, (int)m.right + SetPx(4));
+        }
+        if (focus) FocusRing(dc, {r.left, r.top, right, r.bottom});
+    }
+    SelectObject(dc, oldFont);
+    return CDRF_SKIPDEFAULT;
+}
+
+// A slider in the Windows 11 style: a thin track, filled in the accent colour up to a round thumb.
+static LRESULT DrawSlider(const NMCUSTOMDRAW* cd) {
+    if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+    if (cd->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
+    HWND bar = cd->hdr.hwndFrom;
+    RECT thumb;
+    SendMessageW(bar, TBM_GETTHUMBRECT, 0, (LPARAM)&thumb);
+    const int cx = (thumb.left + thumb.right) / 2, cy = (thumb.top + thumb.bottom) / 2;
+    if (cd->dwItemSpec == TBCD_CHANNEL) {
+        const int h = SetPx(4);
+        RECT track = {cd->rc.left, cy - h / 2, cd->rc.right, cy - h / 2 + h}, done = track;
+        done.right = cx;
+        FillRound(cd->hdc, track, h / 2.0f, g_th.strong);
+        FillRound(cd->hdc, done, h / 2.0f, g_th.accent);
+    } else if (cd->dwItemSpec == TBCD_THUMB) {
+        const int d = SetPx(20), inner = GetFocus() == bar ? SetPx(12) : SetPx(10);
+        FillRound(cd->hdc, {cx - d / 2, cy - d / 2, cx - d / 2 + d, cy - d / 2 + d}, d / 2.0f, g_th.knob, g_th.controlLine);
+        FillRound(cd->hdc, {cx - inner / 2, cy - inner / 2, cx - inner / 2 + inner, cy - inner / 2 + inner}, inner / 2.0f, g_th.accent);
+    }
+    return CDRF_SKIPDEFAULT;
+}
+
+// "Ctrl + Alt + H", as a shortcut box shows it; while keys are held, the modifiers so far.
+static void ShortcutLabel(DWORD k, wchar_t* out, int n) {
+    const BYTE f = HIBYTE(k), vk = LOBYTE(k);
+    wchar_t key[32] = L"";
+    if (vk) KeyText(MAKEWORD(vk, f & HOTKEYF_EXT), key, 32);
+    swprintf(out, n, L"%ls%ls%ls%ls", f & HOTKEYF_CONTROL ? L"Ctrl + " : L"", f & HOTKEYF_ALT ? L"Alt + " : L"",
+             f & HOTKEYF_SHIFT ? L"Shift + " : L"", key);
+}
+
+// The shortcut boxes keep the hotkey control's keyboard handling but are painted like Windows 11 text boxes.
+static void PaintKeyBox(HWND h, HDC target) {
+    RECT r;
+    GetClientRect(h, &r);
+    HDC dc = CreateCompatibleDC(target);
+    HBITMAP bmp = CreateCompatibleBitmap(target, r.right, r.bottom), oldBmp = (HBITMAP)SelectObject(dc, bmp);
+    const bool focus = GetFocus() == h, enabled = IsWindowEnabled(h);
+    const float s = DpiScaleOf(g_setDpi);
+    FillRect(dc, &r, g_th.cardBrush);
+    FillRound(dc, r, 4 * s, focus ? g_th.field : g_th.control, g_th.controlLine);
+    if (focus) FillRound(dc, {r.left + SetPx(2), r.bottom - SetPx(2), r.right - SetPx(2), r.bottom}, 1, g_th.accent);
+    wchar_t text[64];
+    const DWORD k = (DWORD)SendMessageW(h, HKM_GETHOTKEY, 0, 0);
+    ShortcutLabel(k, text, 64);
+    const bool none = !text[0];
+    if (none) wcscpy(text, TR(L"None", L"ไม่มี"));
+    RECT t = r;
+    t.left += SetPx(10);
+    t.right -= SetPx(6);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, none || !enabled ? g_th.dim : g_th.text);
+    HGDIOBJ oldFont = SelectObject(dc, g_fontText);
+    DrawTextW(dc, text, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+    SelectObject(dc, oldFont);
+    BitBlt(target, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+}
+
+static LRESULT CALLBACK KeyBoxProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            PaintKeyBox(h, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(h, KeyBoxProc, id);
+            break;
+    }
+    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+    switch (msg) {
+        case WM_SETFOCUS: case WM_KILLFOCUS: case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+        case WM_CHAR: case HKM_SETHOTKEY: case WM_ENABLE:
+            if (GetFocus() == h) DestroyCaret();  // the focus line under the box shows where typing goes
+            InvalidateRect(h, nullptr, FALSE);
+            break;
+    }
+    return result;
+}
+
+// The tab strip: the tab control's own keyboard and mouse handling, painted as Windows 11 draws a selector bar.
+static void PaintTabs(HWND h, HDC target) {
+    RECT c;
+    GetClientRect(h, &c);
+    HDC dc = CreateCompatibleDC(target);
+    HBITMAP bmp = CreateCompatibleBitmap(target, c.right, c.bottom), oldBmp = (HBITMAP)SelectObject(dc, bmp);
+    FillRect(dc, &c, g_th.backBrush);
+    SetBkMode(dc, TRANSPARENT);
+    const int sel = TabCtrl_GetCurSel(h), count = TabCtrl_GetItemCount(h);
+    const float s = DpiScaleOf(g_setDpi);
+    for (int i = 0; i < count; i++) {
+        RECT item;
+        TabCtrl_GetItemRect(h, i, &item);
+        item.top = c.top + SetPx(2);
+        item.bottom = c.bottom - SetPx(2);
+        if (i == g_tabHot && i != sel) FillRound(dc, item, 4 * s, g_th.tabHot);
+        wchar_t text[64];
+        TCITEMW ti = {TCIF_TEXT};
+        ti.pszText = text;
+        ti.cchTextMax = 64;
+        TabCtrl_GetItem(h, i, &ti);
+        HGDIOBJ oldFont = SelectObject(dc, i == sel ? g_fontBold : g_fontText);
+        SetTextColor(dc, i == sel || i == g_tabHot ? g_th.text : g_th.sub);
+        RECT t = item;
+        t.bottom -= SetPx(3);
+        DrawTextW(dc, text, -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, oldFont);
+        if (i == sel) {
+            const int w = SetPx(18), x = (item.left + item.right - w) / 2;
+            FillRound(dc, {x, item.bottom - SetPx(4), x + w, item.bottom - SetPx(1)}, 1.5f * s, g_th.accent);
+            if (GetFocus() == h && !CuesHidden(h)) FocusRing(dc, item);
+        }
+    }
+    BitBlt(target, 0, 0, c.right, c.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+}
+
+static LRESULT CALLBACK TabsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            PaintTabs(h, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            PaintTabs(h, (HDC)wp);
+            return 0;
+        case WM_MOUSEMOVE: {
+            TCHITTESTINFO hit = {{(short)LOWORD(lp), (short)HIWORD(lp)}};
+            const int hot = TabCtrl_HitTest(h, &hit);
+            if (hot != g_tabHot) {
+                g_tabHot = hot;
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, h};
+            TrackMouseEvent(&tme);
+            break;
+        }
+        case WM_MOUSELEAVE:
+            g_tabHot = -1;
+            InvalidateRect(h, nullptr, FALSE);
+            break;
+        case WM_NCDESTROY:
+            g_tabHot = -1;
+            RemoveWindowSubclass(h, TabsProc, id);
+            break;
+    }
+    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+    if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_UPDATEUISTATE || msg == WM_KEYDOWN || msg == WM_LBUTTONDOWN)
+        InvalidateRect(h, nullptr, FALSE);
+    return result;
+}
+
+// Dark combo boxes come from Windows' own dark theme for them; the shortcut boxes get their painting.
+static void StylePageControls() {
+    for (HWND c = GetWindow(g_setPage, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        wchar_t cls[32];
+        GetClassNameW(c, cls, 32);
+        if (_wcsicmp(cls, WC_COMBOBOXW) == 0) SetWindowTheme(c, g_th.dark ? L"DarkMode_CFD" : nullptr, nullptr);
+        else if (_wcsicmp(cls, HOTKEY_CLASSW) == 0) {
+            SetWindowSubclass(c, KeyBoxProc, 1, 0);
+            // The control adds a sunken edge of its own; the rounded box replaces it.
+            SetWindowLongW(c, GWL_EXSTYLE, GetWindowLongW(c, GWL_EXSTYLE) & ~(WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
+            SetWindowLongW(c, GWL_STYLE, GetWindowLongW(c, GWL_STYLE) & ~WS_BORDER);
+            SetWindowPos(c, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+}
+
+// The title bar takes the window's background colour, dark in dark mode (Windows 11; older versions ignore it).
+static void StyleTitleBar() {
+    const BOOL dark = g_th.dark;
+    DwmSetWindowAttribute(g_setWnd, 20, &dark, sizeof(dark));  // DWMWA_USE_IMMERSIVE_DARK_MODE
+    const COLORREF caption = g_th.contrast ? 0xFFFFFFFF : g_th.back;  // DWMWA_COLOR_DEFAULT under high contrast
+    DwmSetWindowAttribute(g_setWnd, 35, &caption, sizeof(caption));  // DWMWA_CAPTION_COLOR
 }
 
 static void PickColor(const wchar_t* code) {
@@ -2415,6 +2777,8 @@ static void ApplyKey(int i, HWND box) {
             SaveSettings();
         }
     }
+    // A refused key goes back to the one in use, or rebuilding the page would offer it again and repeat the message.
+    if (g_keyStatus[0]) SendMessageW(box, HKM_SETHOTKEY, *ToolKey(i), 0);
     SetDlgItemTextW(g_setPage, CTL_STATUS, g_keyStatus);
 }
 
@@ -2480,7 +2844,11 @@ static void PageCommand(int id, int code, HWND ctl) {
     } else if (id >= CTL_KEY_BASE && id < CTL_KEY_BASE + 3) {
         if (code == EN_CHANGE) ApplyKey(id - CTL_KEY_BASE, ctl);
     } else if (id == CTL_RESTORE) {
-        for (int i = 0; i < 3; i++) *ToolKey(i) = kToolDefaults[i];
+        for (int i = 0; i < 3; i++) {
+            *ToolKey(i) = kToolDefaults[i];
+            // The boxes too: the page is rebuilt next, and it keeps what the boxes say.
+            SendDlgItemMessageW(g_setPage, CTL_KEY_BASE + i, HKM_SETHOTKEY, *ToolKey(i), 0);
+        }
         const int failed = RegisterToolKeys();
         if (g_keysPaused) UnregisterToolKeys();
         g_keyStatus[0] = 0;
@@ -2517,13 +2885,44 @@ static void PageCommand(int id, int code, HWND ctl) {
 static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORBTN: {
+        case WM_CTLCOLORBTN:
+        case WM_CTLCOLORLISTBOX: {  // the list of a combo box
             HDC dc = (HDC)wp;
             const int id = GetDlgCtrlID((HWND)lp);
             SetBkMode(dc, TRANSPARENT);
-            if (id == CTL_CAPTION) SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
-            if (id == CTL_STATUS) SetTextColor(dc, RGB(0xC4, 0x2B, 0x1C));
-            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+            SetBkColor(dc, g_th.card);
+            SetTextColor(dc, id == CTL_CAPTION ? g_th.sub : id == CTL_STATUS ? g_th.status : g_th.text);
+            return (LRESULT)g_th.cardBrush;
+        }
+        case WM_NOTIFY: {
+            const NMHDR* n = (const NMHDR*)lp;
+            if (n->code != (UINT)NM_CUSTOMDRAW) break;
+            wchar_t cls[32];
+            GetClassNameW(n->hwndFrom, cls, 32);
+            if (_wcsicmp(cls, WC_BUTTONW) == 0) return DrawButton((const NMCUSTOMDRAW*)lp);
+            if (_wcsicmp(cls, TRACKBAR_CLASSW) == 0) return DrawSlider((const NMCUSTOMDRAW*)lp);
+            break;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {  // the background and the cards
+            PAINTSTRUCT ps;
+            HDC target = BeginPaint(h, &ps);
+            RECT c;
+            GetClientRect(h, &c);
+            HDC dc = CreateCompatibleDC(target);
+            HBITMAP bmp = CreateCompatibleBitmap(target, c.right, c.bottom), oldBmp = (HBITMAP)SelectObject(dc, bmp);
+            FillRect(dc, &c, g_th.backBrush);
+            for (auto& card : g_cards)
+                FillRound(dc, {SetPx(8), SetPx(card.first), c.right - SetPx(8), SetPx(card.second)}, 8 * DpiScaleOf(g_setDpi), g_th.card,
+                          g_th.cardLine);
+            BitBlt(target, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top, dc,
+                   ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+            SelectObject(dc, oldBmp);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            EndPaint(h, &ps);
+            return 0;
         }
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
@@ -2546,6 +2945,7 @@ static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 MoveLens();
             }
             ShowSliderValues();
+            InvalidateRect((HWND)lp, nullptr, TRUE);  // the round thumb is wider than the one the slider tracks
             SetTimer(g_host, TIMER_SAVE, 1000, nullptr);  // save once the slider stops
             return 0;
         }
@@ -2560,8 +2960,29 @@ static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
+// Light or dark mode, the accent colour or high contrast changed: everything is drawn again in the new colours.
+static void SettingsRetheme() {
+    LoadTheme();
+    StyleTitleBar();
+    BuildPage();
+    RedrawWindow(g_setWnd, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
 static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_ERASEBKGND: {
+            RECT c;
+            GetClientRect(h, &c);
+            FillRect((HDC)wp, &c, g_th.backBrush);
+            return 1;
+        }
+        case WM_SETTINGCHANGE:
+            if (lp && wcscmp((const wchar_t*)lp, L"ImmersiveColorSet") == 0) SettingsRetheme();
+            break;
+        case WM_SYSCOLORCHANGE:
+        case WM_DWMCOLORIZATIONCOLORCHANGED:
+            SettingsRetheme();
+            break;
         case WM_NOTIFY:
             if (((NMHDR*)lp)->code == TCN_SELCHANGE) {
                 g_setTab = TabCtrl_GetCurSel(g_setTabs);
@@ -2590,6 +3011,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             g_setDpi = HIWORD(wp);
             MakeFonts();
             SendMessageW(g_setTabs, WM_SETFONT, (WPARAM)g_fontText, FALSE);
+            TabCtrl_SetPadding(g_setTabs, SetPx(12), SetPx(6));
             const RECT* r = (const RECT*)lp;
             SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
             BuildPage();
@@ -2625,15 +3047,22 @@ static void ShowSettings(int tab) {
     GetCursorPos(&pt);
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi);
-    // Always on top, like a palette: it stays visible while you try a setting out in another app.
+    // Always on top, like a palette: it stays visible while you try a setting out in another app. Only a close button,
+    // as a fixed-size window that cannot be maximised would otherwise show a greyed-out one.
+    LoadTheme();
     g_setWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_CONTROLPARENT, L"CursorLingoSettings", L"",
-                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN, mi.rcWork.left + 40,
+                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, mi.rcWork.left + 40,
                                mi.rcWork.top + 40, 100, 100, nullptr, nullptr, g_inst, nullptr);
+    StyleTitleBar();
     g_setDpi = GetDpiForWindow(g_setWnd);
     MakeFonts();
     g_setTabs = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, 0, 1, 1, g_setWnd,
                                 nullptr, g_inst, nullptr);
+    SetWindowSubclass(g_setTabs, TabsProc, 1, 0);
     SendMessageW(g_setTabs, WM_SETFONT, (WPARAM)g_fontText, FALSE);
+    TabCtrl_SetPadding(g_setTabs, SetPx(12), SetPx(6));
+    // Focus rings stay hidden until the keyboard is used, as the window opens from a mouse click on the tray.
+    SendMessageW(g_setWnd, WM_CHANGEUISTATE, MAKEWPARAM(UIS_INITIALIZE, 0), 0);
     SetSettingsTexts();
     TabCtrl_SetCurSel(g_setTabs, g_setTab);
     g_keyStatus[0] = 0;
