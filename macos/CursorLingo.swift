@@ -116,6 +116,17 @@ struct Settings {
         get { d.object(forKey: "spotlightRadius") as? Double ?? 100 }
         set { d.set(newValue, forKey: "spotlightRadius") }
     }
+    /// The shortcut of a presentation tool: its default until changed, nil once cleared.
+    static func shortcut(_ tool: PresentTool) -> Shortcut? {
+        guard let keys = d.array(forKey: "shortcut." + tool.rawValue) as? [Int] else { return tool.defaultShortcut }
+        return keys.count == 2 ? Shortcut(keyCode: keys[0], modifiers: keys[1]) : nil
+    }
+    static func setShortcut(_ s: Shortcut?, for tool: PresentTool) {
+        d.set(s.map { [$0.keyCode, $0.modifiers] } ?? [], forKey: "shortcut." + tool.rawValue)
+    }
+    static func resetShortcuts() {
+        for tool in PresentTool.allCases { d.removeObject(forKey: "shortcut." + tool.rawValue) }
+    }
     /// Magnification of the presentation zoom lens.
     static var zoomLevel: Double {
         get { d.object(forKey: "zoomLevel") as? Double ?? 2 }
@@ -1119,6 +1130,8 @@ final class HotKey {
     private var ref: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private let action: () -> Void
+    /// False when the key couldn't be had, for example because another app holds it.
+    private(set) var registered = false
 
     init(keyCode: Int, modifiers: Int, action: @escaping () -> Void) {
         self.action = action
@@ -1138,12 +1151,272 @@ final class HotKey {
         }
         InstallEventHandler(GetApplicationEventTarget(), callback, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
         let hotKeyID = EventHotKeyID(signature: OSType(0x434C_4750), id: id)  // "CLGP"
-        RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        registered = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref) == noErr
     }
 
     deinit {
         if let ref { UnregisterEventHotKey(ref) }
         if let handler { RemoveEventHandler(handler) }
+    }
+}
+
+// MARK: - Shortcuts
+
+/// The presentation tools that have a shortcut of their own.
+enum PresentTool: String, CaseIterable {
+    case spotlight, zoom, draw
+    var title: String {
+        switch self {
+        case .spotlight: return tr("Spotlight", "สปอตไลต์")
+        case .zoom: return tr("Zoom", "ซูม")
+        case .draw: return tr("Draw on Screen", "วาดบนจอ")
+        }
+    }
+    var defaultShortcut: Shortcut {
+        let key = [PresentTool.spotlight: kVK_ANSI_H, .zoom: kVK_ANSI_Z, .draw: kVK_ANSI_D][self]!
+        return Shortcut(keyCode: key, modifiers: controlKey | optionKey)
+    }
+}
+
+/// A key plus Carbon modifiers (controlKey, optionKey, shiftKey, cmdKey), as RegisterEventHotKey takes them.
+struct Shortcut: Equatable {
+    var keyCode: Int
+    var modifiers: Int
+
+    /// The keys a shortcut can use, by their US position, with the name shown for each.
+    private static let names: [Int: String] = {
+        var n: [Int: String] = [
+            kVK_ANSI_A: "A", kVK_ANSI_B: "B", kVK_ANSI_C: "C", kVK_ANSI_D: "D", kVK_ANSI_E: "E", kVK_ANSI_F: "F",
+            kVK_ANSI_G: "G", kVK_ANSI_H: "H", kVK_ANSI_I: "I", kVK_ANSI_J: "J", kVK_ANSI_K: "K", kVK_ANSI_L: "L",
+            kVK_ANSI_M: "M", kVK_ANSI_N: "N", kVK_ANSI_O: "O", kVK_ANSI_P: "P", kVK_ANSI_Q: "Q", kVK_ANSI_R: "R",
+            kVK_ANSI_S: "S", kVK_ANSI_T: "T", kVK_ANSI_U: "U", kVK_ANSI_V: "V", kVK_ANSI_W: "W", kVK_ANSI_X: "X",
+            kVK_ANSI_Y: "Y", kVK_ANSI_Z: "Z",
+            kVK_ANSI_0: "0", kVK_ANSI_1: "1", kVK_ANSI_2: "2", kVK_ANSI_3: "3", kVK_ANSI_4: "4",
+            kVK_ANSI_5: "5", kVK_ANSI_6: "6", kVK_ANSI_7: "7", kVK_ANSI_8: "8", kVK_ANSI_9: "9",
+            kVK_ANSI_Equal: "=", kVK_ANSI_Minus: "-", kVK_ANSI_LeftBracket: "[", kVK_ANSI_RightBracket: "]",
+            kVK_ANSI_Semicolon: ";", kVK_ANSI_Quote: "'", kVK_ANSI_Comma: ",", kVK_ANSI_Period: ".",
+            kVK_ANSI_Slash: "/", kVK_ANSI_Backslash: "\\", kVK_ANSI_Grave: "`",
+        ]
+        let fKeys = [kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10, kVK_F11, kVK_F12]
+        for (i, key) in fKeys.enumerated() { n[key] = "F\(i + 1)" }
+        return n
+    }()
+    /// In use while a tool is on (zoom in / out, take back a stroke), so they can't be picked.
+    static let reserved = [Shortcut(keyCode: kVK_ANSI_Equal, modifiers: controlKey | optionKey),
+                           Shortcut(keyCode: kVK_ANSI_Minus, modifiers: controlKey | optionKey),
+                           Shortcut(keyCode: kVK_ANSI_Z, modifiers: cmdKey)]
+
+    init(keyCode: Int, modifiers: Int) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+    }
+
+    /// From a key press: needs ⌃, ⌥ or ⌘ (so it never takes plain typing), and a key from the list above.
+    init?(event: NSEvent) {
+        let f = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard !f.isDisjoint(with: [.control, .option, .command]), Shortcut.names[Int(event.keyCode)] != nil else { return nil }
+        var m = 0
+        if f.contains(.control) { m |= controlKey }
+        if f.contains(.option) { m |= optionKey }
+        if f.contains(.shift) { m |= shiftKey }
+        if f.contains(.command) { m |= cmdKey }
+        self.init(keyCode: Int(event.keyCode), modifiers: m)
+    }
+
+    var display: String {
+        var s = ""
+        if modifiers & controlKey != 0 { s += "⌃" }
+        if modifiers & optionKey != 0 { s += "⌥" }
+        if modifiers & shiftKey != 0 { s += "⇧" }
+        if modifiers & cmdKey != 0 { s += "⌘" }
+        return s + (Shortcut.names[keyCode] ?? "?")
+    }
+
+    /// For showing it next to a menu item.
+    var keyEquivalent: String {
+        let name = Shortcut.names[keyCode] ?? ""
+        if name.count > 1, let n = Int(name.dropFirst()), let f = UnicodeScalar(NSF1FunctionKey + n - 1) {
+            return String(Character(f))
+        }
+        return name.lowercased()
+    }
+    var modifierFlags: NSEvent.ModifierFlags {
+        var f: NSEvent.ModifierFlags = []
+        if modifiers & controlKey != 0 { f.insert(.control) }
+        if modifiers & optionKey != 0 { f.insert(.option) }
+        if modifiers & shiftKey != 0 { f.insert(.shift) }
+        if modifiers & cmdKey != 0 { f.insert(.command) }
+        return f
+    }
+}
+
+/// A box that records a shortcut: click it, then press the keys. Delete clears it, Esc gives up.
+final class ShortcutField: NSView {
+    var shortcut: Shortcut? { didSet { needsDisplay = true } }
+    /// The user picked a new shortcut, or cleared it (nil).
+    var onRecord: ((Shortcut?) -> Void)?
+    /// Listening for keys starts or stops (the app's own shortcuts are paused meanwhile, so the keys reach the box).
+    var onListening: ((Bool) -> Void)?
+    private var listening = false {
+        didSet {
+            needsDisplay = true
+            if listening != oldValue { onListening?(listening) }
+        }
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+    override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 24) }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        listening = true
+    }
+    override func resignFirstResponder() -> Bool {
+        listening = false
+        return true
+    }
+    override func keyDown(with event: NSEvent) {
+        if listening { record(event) } else { super.keyDown(with: event) }
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {  // ⌘ combinations arrive here, not in keyDown
+        guard listening, event.type == .keyDown else { return false }
+        record(event)
+        return true
+    }
+
+    private func record(_ event: NSEvent) {
+        switch Int(event.keyCode) {
+        case kVK_Escape:
+            break
+        case kVK_Delete, kVK_ForwardDelete:
+            onRecord?(nil)
+        default:
+            guard let s = Shortcut(event: event) else { NSSound.beep(); return }
+            onRecord?(s)
+        }
+        window?.makeFirstResponder(nil)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        (listening ? NSColor.controlAccentColor.withAlphaComponent(0.15) : NSColor.controlBackgroundColor).setFill()
+        box.fill()
+        (listening ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        box.stroke()
+        let text = listening ? tr("Type shortcut…", "กดคีย์ที่ต้องการ…") : shortcut?.display ?? tr("None", "ไม่มี")
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: listening || shortcut == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
+        ]
+        let size = text.size(withAttributes: attrs)
+        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
+    }
+}
+
+/// The Shortcuts window: one box per presentation tool, plus Restore Defaults.
+final class ShortcutsWindow: NSObject, NSWindowDelegate {
+    /// Registers the shortcuts as saved; returns the tools whose shortcut another app already has.
+    var apply: (() -> [PresentTool])?
+    /// Pauses (true) or restores (false) the app's shortcuts while a box listens.
+    var pause: ((Bool) -> Void)?
+    private var window: NSWindow?
+    private var fields: [PresentTool: ShortcutField] = [:]
+    private let status = NSTextField(labelWithString: "")
+
+    func show() {
+        if window?.isVisible != true { build() }  // rebuilt each time, in the menu's current language
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func build() {
+        fields = [:]
+        let rows: [[NSView]] = PresentTool.allCases.enumerated().map { index, tool in
+            let field = ShortcutField()
+            field.shortcut = Settings.shortcut(tool)
+            field.onRecord = { [weak self] s in self?.set(tool, s) }
+            field.onListening = { [weak self] on in self?.pause?(on) }
+            fields[tool] = field
+            let clear = NSButton(title: tr("Clear", "ล้าง"), target: self, action: #selector(clear(_:)))
+            clear.tag = index
+            clear.controlSize = .small
+            return [NSTextField(labelWithString: tool.title), field, clear]
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 10
+        grid.columnSpacing = 12
+        grid.rowAlignment = .lastBaseline
+        let note = NSTextField(wrappingLabelWithString: tr(
+            "Click a box and press the new keys: ⌃, ⌥ or ⌘ with a letter, number or F-key. Delete clears a box. Esc, ⌘Z and ⌃⌥ = / − stay as they are.",
+            "คลิกที่ช่องแล้วกดคีย์ใหม่ ต้องมี ⌃ ⌥ หรือ ⌘ คู่กับตัวอักษร ตัวเลข หรือปุ่ม F กด Delete เพื่อล้างช่อง ส่วน Esc, ⌘Z และ ⌃⌥ = / − ใช้ตามเดิม"))
+        note.textColor = .secondaryLabelColor
+        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        note.preferredMaxLayoutWidth = 340
+        status.stringValue = ""
+        status.textColor = .systemRed
+        status.preferredMaxLayoutWidth = 340
+        status.lineBreakMode = .byWordWrapping
+        let restore = NSButton(title: tr("Restore Defaults", "คืนค่าเริ่มต้น"), target: self, action: #selector(restoreDefaults))
+        let stack = NSStackView(views: [grid, note, status, restore])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+
+        let w = window ?? NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = tr("CursorLingo Shortcuts", "คีย์ลัด CursorLingo")
+        w.isReleasedWhenClosed = false
+        w.delegate = self
+        w.contentView = stack
+        w.setContentSize(stack.fittingSize)
+        if window == nil { w.center() }
+        window = w
+    }
+
+    private func set(_ tool: PresentTool, _ s: Shortcut?) {
+        if let s {
+            if Shortcut.reserved.contains(s) {
+                return fail(tr("\(s.display) is used while a tool is on. Pick another.",
+                               "\(s.display) ใช้อยู่ตอนเปิดเครื่องมือ เลือกคีย์อื่น"))
+            }
+            if let other = PresentTool.allCases.first(where: { $0 != tool && Settings.shortcut($0) == s }) {
+                return fail(tr("\(s.display) is already used for \(other.title).", "\(s.display) ใช้กับ\(other.title)อยู่แล้ว"))
+            }
+        }
+        let old = Settings.shortcut(tool)
+        Settings.setShortcut(s, for: tool)
+        let failed = apply?() ?? []
+        if let s, failed.contains(tool) {
+            Settings.setShortcut(old, for: tool)
+            _ = apply?()
+            return fail(tr("Another app already uses \(s.display).", "มีแอปอื่นใช้ \(s.display) อยู่แล้ว"))
+        }
+        status.stringValue = ""
+        refresh()
+    }
+
+    private func fail(_ message: String) {
+        status.stringValue = message
+        NSSound.beep()
+        refresh()
+    }
+
+    private func refresh() {
+        for (tool, field) in fields { field.shortcut = Settings.shortcut(tool) }
+    }
+
+    @objc private func clear(_ sender: NSButton) { set(PresentTool.allCases[sender.tag], nil) }
+
+    @objc private func restoreDefaults() {
+        Settings.resetShortcuts()
+        let failed = apply?() ?? []
+        status.stringValue = failed.isEmpty ? "" : tr("Another app already uses: ", "มีแอปอื่นใช้คีย์นี้อยู่แล้ว: ")
+            + failed.map { $0.defaultShortcut.display }.joined(separator: ", ")
+        refresh()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        window?.makeFirstResponder(nil)  // a box still listening lets go, and the shortcuts come back
     }
 }
 
@@ -1201,6 +1474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var autoFixRetry: Timer?
     private let presenter = Presenter()
     private var presentationKeys: [HotKey] = []
+    private let shortcutsWindow = ShortcutsWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildPanel()
@@ -1235,12 +1509,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             Settings.presentation = self.presenter.spotlight
         }
-        // ⌃⌥H spotlight, ⌃⌥Z zoom, ⌃⌥D draw: on and off from anywhere.
-        presentationKeys = [
-            HotKey(keyCode: kVK_ANSI_H, modifiers: controlKey | optionKey) { [weak self] in self?.toggleSpotlight() },
-            HotKey(keyCode: kVK_ANSI_Z, modifiers: controlKey | optionKey) { [weak self] in self?.toggleZoom() },
-            HotKey(keyCode: kVK_ANSI_D, modifiers: controlKey | optionKey) { [weak self] in self?.toggleDrawing() },
-        ]
+        registerShortcuts()
+        shortcutsWindow.apply = { [weak self] in self?.registerShortcuts() ?? [] }
+        shortcutsWindow.pause = { [weak self] on in
+            if on { self?.presentationKeys = [] } else { self?.registerShortcuts() }
+        }
 
         let mouseEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         if let m = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents, handler: { [weak self] _ in self?.follow() }) {
@@ -1601,6 +1874,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoFix.codeEditorsManual = Settings.codeEditorsManual
     }
     @objc private func forgetLearned() { autoFix.forgetRules() }
+    /// The tools' shortcuts (⌃⌥H, ⌃⌥Z, ⌃⌥D unless changed) work from anywhere. Returns the tools whose shortcut
+    /// another app already has.
+    @discardableResult
+    private func registerShortcuts() -> [PresentTool] {
+        presentationKeys = []  // a key can't be registered twice: let the old ones go first
+        var failed: [PresentTool] = []
+        for tool in PresentTool.allCases {
+            guard let s = Settings.shortcut(tool) else { continue }
+            let key = HotKey(keyCode: s.keyCode, modifiers: s.modifiers) { [weak self] in self?.toggle(tool) }
+            if key.registered { presentationKeys.append(key) } else { failed.append(tool) }
+        }
+        return failed
+    }
+    private func toggle(_ tool: PresentTool) {
+        switch tool {
+        case .spotlight: toggleSpotlight()
+        case .zoom: toggleZoom()
+        case .draw: toggleDrawing()
+        }
+    }
+    @objc private func showShortcuts() { shortcutsWindow.show() }
     @objc private func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
     @objc private func toggleZoom() { presenter.setZoom(!presenter.zoom) }
     @objc private func toggleDrawing() { presenter.setDrawing(!presenter.drawing) }
@@ -1613,14 +1907,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Spotlight, Zoom and Draw, with their shortcuts (shown as hints; they work anywhere).
     private func presentationMenu() -> NSMenuItem {
         let sub = NSMenu()
-        let tools: [(String, Selector, Bool, String)] = [
-            (tr("Spotlight", "สปอตไลต์"), #selector(toggleSpotlight), presenter.spotlight, "h"),
-            (tr("Zoom", "ซูม"), #selector(toggleZoom), presenter.zoom, "z"),
-            (tr("Draw on Screen", "วาดบนจอ"), #selector(toggleDrawing), presenter.drawing, "d"),
+        let tools: [(PresentTool, Selector, Bool)] = [
+            (.spotlight, #selector(toggleSpotlight), presenter.spotlight),
+            (.zoom, #selector(toggleZoom), presenter.zoom),
+            (.draw, #selector(toggleDrawing), presenter.drawing),
         ]
-        for (title, action, on, key) in tools {
-            let i = item(title, action, on: on, key: key)
-            i.keyEquivalentModifierMask = [.control, .option]
+        for (tool, action, on) in tools {
+            let i = item(tool.title, action, on: on)
+            if let s = Settings.shortcut(tool) {
+                i.keyEquivalent = s.keyEquivalent
+                i.keyEquivalentModifierMask = s.modifierFlags
+            }
             sub.addItem(i)
         }
         sub.autoenablesItems = false
@@ -1641,6 +1938,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             i.isEnabled = false
             sub.addItem(i)
         }
+        sub.addItem(.separator())
+        sub.addItem(item(tr("Shortcuts…", "ตั้งคีย์ลัด…"), #selector(showShortcuts)))
         let top = NSMenuItem(title: tr("Presentation", "นำเสนอ"), action: nil, keyEquivalent: "")
         top.state = presenter.isOn || presenter.drawing ? .on : .off
         top.submenu = sub

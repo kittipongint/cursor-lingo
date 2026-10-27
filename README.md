@@ -33,6 +33,7 @@
   - **Zoom** (⌃⌥Z / Ctrl+Alt+Z): the circle magnifies what is under the pointer. ⌃⌥= and ⌃⌥− (Ctrl+Alt+= / −) zoom in and out, from 1.5× to 8×.
   - **Draw on screen** (⌃⌥D / Ctrl+Alt+D): draw with the mouse; ⌘Z / Ctrl+Z takes back the last stroke. While drawing, clicks go to the pen.
   - Hold ⌃⌥ / Ctrl+Alt and scroll to resize the circle. Esc stops drawing first, then turns everything off.
+  - Change the three tools' shortcuts in **Presentation → Shortcuts…**.
   - Spotlight and drawing need no permissions, and neither does zoom on Windows. Zoom on macOS needs **Screen Recording**, because it has to see the screen; macOS asks the first time you turn zoom on, and recent versions ask again every so often, as they do for every app that records the screen.
 - **Remember language per app (optional).** Each app gets back the layout you last used in it, e.g. English in your editor and Thai in your chat app.
 - **Launch at login / Start with Windows**, toggled from the menu.
@@ -185,7 +186,7 @@ Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
 - hide the badge for the current language, or show it for all languages again,
 - choose **Show**, **Style** and **Size**,
 - set **Fix Wrong Language (EN ⇄ TH)** to Off, Double Shift Only or Automatic, toggle **In Code Editors: Double Shift Only**, and forget learned words,
-- toggle the **Presentation** tools: Spotlight, Zoom and Draw on Screen (their shortcuts work from anywhere),
+- toggle the **Presentation** tools: Spotlight, Zoom and Draw on Screen (their shortcuts work from anywhere, and **Shortcuts…** changes them),
 - toggle **Remember Language per App**,
 - toggle **Launch at Login** / **Start with Windows**,
 - choose the menu's **Language / ภาษา**: English, Thai, or the system's language (the default),

@@ -28,6 +28,7 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <uiautomation.h>
+#include <commctrl.h>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -69,6 +70,7 @@ struct Settings {
     DWORD presentation = 0;     // spotlight around the pointer + click ripples
     DWORD spotRadius = 100;     // spotlight radius in points (40..300)
     DWORD zoomLevel = 20;       // zoom lens magnification, in tenths (15..80)
+    DWORD keySpotlight = 0x648, keyZoom = 0x65A, keyDraw = 0x644;  // tool shortcuts (see RegisterToolKeys), Ctrl+Alt+H/Z/D
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
 
@@ -99,6 +101,9 @@ static const SettingField kFields[] = {
     {L"Presentation", &g_set.presentation, 0, 2},
     {L"SpotlightRadius", &g_set.spotRadius, 100, 301},
     {L"ZoomLevel", &g_set.zoomLevel, 20, 81},
+    {L"ShortcutSpotlight", &g_set.keySpotlight, 0x648, 0x10000},
+    {L"ShortcutZoom", &g_set.keyZoom, 0x65A, 0x10000},
+    {L"ShortcutDraw", &g_set.keyDraw, 0x644, 0x10000},
 };
 
 static void FindSettingsFiles() {
@@ -466,7 +471,7 @@ enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RES
 enum { HOTKEY_PRESENTATION = 1, HOTKEY_ESCAPE, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO };
 enum {
     ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_QUIT, ID_CODE_EDITORS, ID_REPORT, ID_FORGET_WORDS, ID_PER_APP,
-    ID_PRESENTATION, ID_ZOOM, ID_DRAW,
+    ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS,
     ID_FIX_BASE = 150, ID_UILANG_BASE = 160,
     ID_STYLE_BASE = 200, ID_MODE_BASE = 300, ID_SIZE_BASE = 400,
 };
@@ -1638,6 +1643,180 @@ static void ReinstallHooks() {
     if (UpdateLanguage()) Refresh(true);
 }
 
+// ---------------------------------------------------------------------------
+// Shortcuts of the presentation tools, and the window to change them
+// ---------------------------------------------------------------------------
+//
+// A shortcut is stored as the hotkey control gives it: the virtual key in the low byte, HOTKEYF_* in the high byte
+// (0 = none). The window uses Windows' own hotkey control, which reads the keys only while it has the focus.
+
+static const int kToolHotkeys[3] = {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW};
+static const WORD kToolDefaults[3] = {MAKEWORD('H', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD('Z', HOTKEYF_CONTROL | HOTKEYF_ALT),
+                                      MAKEWORD('D', HOTKEYF_CONTROL | HOTKEYF_ALT)};
+static const wchar_t* kToolNames[2][3] = {{L"Spotlight", L"Zoom", L"Draw on screen"}, {L"สปอตไลต์", L"ซูม", L"วาดบนจอ"}};
+static DWORD* ToolKey(int i) {
+    DWORD* keys[] = {&g_set.keySpotlight, &g_set.keyZoom, &g_set.keyDraw};
+    return keys[i];
+}
+
+// Registers the tools' shortcuts; returns a bit for each tool whose keys another app already has.
+static int RegisterToolKeys() {
+    int failed = 0;
+    for (int i = 0; i < 3; i++) {
+        UnregisterHotKey(g_host, kToolHotkeys[i]);
+        DWORD k = *ToolKey(i);
+        BYTE f = HIBYTE(k);
+        UINT mods = (f & HOTKEYF_CONTROL ? MOD_CONTROL : 0) | (f & HOTKEYF_ALT ? MOD_ALT : 0) | (f & HOTKEYF_SHIFT ? MOD_SHIFT : 0);
+        if (k && !RegisterHotKey(g_host, kToolHotkeys[i], mods | MOD_NOREPEAT, LOBYTE(k))) failed |= 1 << i;
+    }
+    return failed;
+}
+
+static void UnregisterToolKeys() {
+    for (int id : kToolHotkeys) UnregisterHotKey(g_host, id);
+}
+
+// "Ctrl+Alt+H"; empty for none.
+static void KeyText(DWORD k, wchar_t* out, int n) {
+    out[0] = 0;
+    if (!k) return;
+    BYTE f = HIBYTE(k), vk = LOBYTE(k);
+    wchar_t name[32] = L"";
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        name[0] = vk;  // not GetKeyNameText: under the Thai layout it would name the Thai letter
+        name[1] = 0;
+    } else {
+        LONG sc = (LONG)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) << 16;
+        if (f & HOTKEYF_EXT) sc |= 1 << 24;
+        if (!GetKeyNameTextW(sc, name, 32)) swprintf(name, 32, L"#%u", vk);
+    }
+    swprintf(out, n, L"%ls%ls%ls%ls", f & HOTKEYF_CONTROL ? L"Ctrl+" : L"", f & HOTKEYF_ALT ? L"Alt+" : L"",
+             f & HOTKEYF_SHIFT ? L"Shift+" : L"", name);
+}
+
+enum { IDC_KEY_BASE = 1000, IDC_RESTORE = 1010 };
+static HWND g_keysWnd, g_keyCtl[3];
+static HFONT g_keysFont;
+
+// OK: refuses a shortcut used twice, or one the tools need while on; then registers, and keeps the old ones if
+// another app holds any of the new keys.
+static bool ApplyKeys() {
+    DWORD keys[3];
+    for (int i = 0; i < 3; i++) keys[i] = (WORD)SendMessageW(g_keyCtl[i], HKM_GETHOTKEY, 0, 0);
+    const WORD reserved[] = {MAKEWORD(VK_OEM_PLUS, HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD(VK_OEM_MINUS, HOTKEYF_CONTROL | HOTKEYF_ALT),
+                             MAKEWORD('Z', HOTKEYF_CONTROL)};
+    wchar_t text[32], msg[256];
+    for (int i = 0; i < 3; i++) {
+        if (!keys[i]) continue;
+        KeyText(keys[i], text, 32);
+        for (WORD r : reserved)
+            if (keys[i] == r) {
+                swprintf(msg, 256, TR(L"%ls is used while a tool is on. Pick another.", L"%ls ใช้อยู่ตอนเปิดเครื่องมือ เลือกคีย์อื่น"), text);
+                MessageBoxW(g_keysWnd, msg, kAppName, MB_ICONWARNING);
+                return false;
+            }
+        for (int j = i + 1; j < 3; j++)
+            if (keys[i] == keys[j]) {
+                swprintf(msg, 256, TR(L"%ls is set for two tools.", L"%ls ถูกตั้งไว้ให้สองเครื่องมือ"), text);
+                MessageBoxW(g_keysWnd, msg, kAppName, MB_ICONWARNING);
+                return false;
+            }
+    }
+    DWORD old[3];
+    for (int i = 0; i < 3; i++) {
+        old[i] = *ToolKey(i);
+        *ToolKey(i) = keys[i];
+    }
+    int failed = RegisterToolKeys();
+    UnregisterToolKeys();  // the window is still open; they come back when it closes
+    if (failed) {
+        for (int i = 0; i < 3; i++) *ToolKey(i) = old[i];
+        wchar_t list[128] = L"";
+        for (int i = 0; i < 3; i++)
+            if (failed & (1 << i)) {
+                KeyText(keys[i], text, 32);
+                if (list[0]) wcscat(list, L", ");
+                wcscat(list, text);
+            }
+        swprintf(msg, 256, TR(L"Another app already uses %ls. Pick another.", L"มีแอปอื่นใช้ %ls อยู่แล้ว เลือกคีย์อื่น"), list);
+        MessageBoxW(g_keysWnd, msg, kAppName, MB_ICONWARNING);
+        return false;
+    }
+    SaveSettings();
+    return true;
+}
+
+static LRESULT CALLBACK KeysProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDOK && ApplyKeys()) DestroyWindow(h);
+            if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);
+            if (LOWORD(wp) == IDC_RESTORE)
+                for (int i = 0; i < 3; i++) SendMessageW(g_keyCtl[i], HKM_SETHOTKEY, kToolDefaults[i], 0);
+            return 0;
+        case WM_CTLCOLORSTATIC:
+            SetBkMode((HDC)wp, TRANSPARENT);
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        case WM_CLOSE:
+            DestroyWindow(h);
+            return 0;
+        case WM_DESTROY:
+            g_keysWnd = nullptr;
+            DeleteObject(g_keysFont);
+            g_keysFont = nullptr;
+            RegisterToolKeys();
+            return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+static void ShowShortcuts() {
+    if (g_keysWnd) { SetForegroundWindow(g_keysWnd); return; }
+    const int th = UiThai();
+    UINT dpi = g_dpi;
+    auto px = [dpi](int v) { return MulDiv(v, (int)dpi, 96); };
+    NONCLIENTMETRICSW ncm = {sizeof(ncm)};
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
+    g_keysFont = CreateFontIndirectW(&ncm.lfMessageFont);
+
+    RECT r = {0, 0, px(380), px(236)};
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, ex = WS_EX_CONTROLPARENT | WS_EX_DLGMODALFRAME;
+    AdjustWindowRectExForDpi(&r, style, FALSE, ex, dpi);
+    POINT pt;
+    GetCursorPos(&pt);
+    int w = r.right - r.left, h = r.bottom - r.top;
+    g_keysWnd = CreateWindowExW(ex, L"CursorLingoKeys", TR(L"CursorLingo shortcuts", L"คีย์ลัด CursorLingo"), style,
+                                std::max((int)g_workRect.left, std::min((int)pt.x - w / 2, (int)g_workRect.right - w)),
+                                std::max((int)g_workRect.top, std::min((int)pt.y - h / 2, (int)g_workRect.bottom - h)), w, h,
+                                nullptr, nullptr, g_inst, nullptr);
+    auto add = [&](const wchar_t* cls, const wchar_t* text, DWORD st, int x, int y, int cw, int ch, int id) {
+        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | st, px(x), px(y), px(cw), px(ch), g_keysWnd,
+                                 (HMENU)(INT_PTR)id, g_inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)g_keysFont, FALSE);
+        return c;
+    };
+    for (int i = 0; i < 3; i++) {
+        add(L"STATIC", kToolNames[th][i], SS_CENTERIMAGE, 16, 16 + i * 36, 130, 26, 0);
+        g_keyCtl[i] = add(HOTKEY_CLASSW, L"", WS_TABSTOP | WS_BORDER, 150, 16 + i * 36, 214, 26, IDC_KEY_BASE + i);
+        // Keys without Ctrl or Alt would take plain typing: the control turns them into Ctrl+Alt+key.
+        SendMessageW(g_keyCtl[i], HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
+        SendMessageW(g_keyCtl[i], HKM_SETHOTKEY, *ToolKey(i), 0);
+    }
+    add(L"STATIC",
+        TR(L"Click a box and press the new keys, with Ctrl or Alt. Backspace clears a box. Esc, Ctrl+Z and Ctrl+Alt+= / − "
+           L"stay as they are.",
+           L"คลิกที่ช่องแล้วกดคีย์ใหม่ ต้องมี Ctrl หรือ Alt ด้วย กด Backspace เพื่อล้างช่อง ส่วน Esc, Ctrl+Z และ Ctrl+Alt+= / − ใช้ตามเดิม"),
+        0, 16, 126, 348, 52, 0);
+    add(L"BUTTON", TR(L"Restore defaults", L"คืนค่าเริ่มต้น"), WS_TABSTOP, 16, 192, 130, 30, IDC_RESTORE);
+    add(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 194, 192, 82, 30, IDOK);
+    add(L"BUTTON", TR(L"Cancel", L"ยกเลิก"), WS_TABSTOP, 282, 192, 82, 30, IDCANCEL);
+
+    UnregisterToolKeys();  // so pressing the current shortcut reaches the box instead of toggling a tool
+    ShowWindow(g_keysWnd, SW_SHOW);
+    SetForegroundWindow(g_keysWnd);
+    SetFocus(g_keyCtl[0]);
+}
+
 static void ShowMenu() {
     HMENU m = CreatePopupMenu(), style = CreatePopupMenu(), mode = CreatePopupMenu(), size = CreatePopupMenu(),
           fix = CreatePopupMenu(), lang = CreatePopupMenu();
@@ -1656,16 +1835,20 @@ static void ShowMenu() {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, TR(L"Style", L"รูปแบบ"));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)size, TR(L"Size", L"ขนาด"));
     HMENU present = CreatePopupMenu();
-    AppendMenuW(present, MF_STRING | (g_set.presentation ? MF_CHECKED : 0), ID_PRESENTATION,
-                TR(L"Spotlight\tCtrl+Alt+H", L"สปอตไลต์\tCtrl+Alt+H"));
-    AppendMenuW(present, MF_STRING | (g_zoom ? MF_CHECKED : 0), ID_ZOOM, TR(L"Zoom\tCtrl+Alt+Z", L"ซูม\tCtrl+Alt+Z"));
-    AppendMenuW(present, MF_STRING | (g_drawing ? MF_CHECKED : 0), ID_DRAW,
-                TR(L"Draw on screen\tCtrl+Alt+D", L"วาดบนจอ\tCtrl+Alt+D"));
+    const bool toolOn[3] = {g_set.presentation != 0, g_zoom, g_drawing};
+    for (int i = 0; i < 3; i++) {
+        wchar_t key[32], title[64];
+        KeyText(*ToolKey(i), key, 32);
+        swprintf(title, 64, L"%ls\t%ls", kToolNames[th][i], key);
+        AppendMenuW(present, MF_STRING | (toolOn[i] ? MF_CHECKED : 0), ID_PRESENTATION + i, title);
+    }
     AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt + wheel: resize the circle", L"Ctrl+Alt + ล้อเมาส์: ปรับขนาดวง"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt+= / \u2212: zoom in / out", L"Ctrl+Alt+= / \u2212: ซูมเข้า / ออก"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Z: undo last stroke", L"Ctrl+Z: ลบเส้นล่าสุด"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Esc: stop drawing, then exit", L"Esc: เลิกวาด กดอีกครั้งเพื่อออก"));
+    AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(present, MF_STRING, ID_SHORTCUTS, TR(L"Shortcuts\u2026", L"ตั้งคีย์ลัด\u2026"));
     AppendMenuW(m, MF_POPUP | (CircleOn() || g_drawing ? MF_CHECKED : 0), (UINT_PTR)present, TR(L"Presentation", L"นำเสนอ"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // One menu for the whole feature: Off, Double Shift only (fix on request) or Automatic.
@@ -1718,6 +1901,7 @@ static void ShowMenu() {
     }
     if (cmd == ID_ZOOM) { SetZoom(!g_zoom); return; }
     if (cmd == ID_DRAW) { SetDrawing(!g_drawing); return; }
+    if (cmd == ID_SHORTCUTS) { ShowShortcuts(); return; }
     if (cmd == ID_PER_APP) {
         g_set.perAppLanguage = !g_set.perAppLanguage;
         SaveSettings();  // the first app is remembered when it comes back to the front
@@ -1864,6 +2048,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_inst = inst;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // for the Startup-folder shortcut
+    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_HOTKEY_CLASS};  // the shortcuts window
+    InitCommonControlsEx(&icc);
     FindSettingsFiles();
     MigrateFromRegistry();
     LoadSettings();
@@ -1884,7 +2070,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.lpszClassName = L"CursorLingoDraw";
     wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
     RegisterClassW(&wc);
+    wc.lpfnWndProc = KeysProc;  // the shortcuts window
+    wc.lpszClassName = L"CursorLingoKeys";
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
+    RegisterClassW(&wc);
     wc.hCursor = nullptr;
+    wc.hbrBackground = nullptr;
+    wc.hIcon = nullptr;
     wc.lpfnWndProc = HostProc;
     wc.lpszClassName = L"CursorLingoHost";
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
@@ -1910,10 +2104,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     AddTrayIcon();
     Refresh(false);
     if (g_set.presentation) SetPresentation(true);
-    // Ctrl+Alt+H spotlight, Ctrl+Alt+Z zoom, Ctrl+Alt+D draw, from anywhere (RegisterHotKey needs no special rights).
-    RegisterHotKey(g_host, HOTKEY_PRESENTATION, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'H');
-    RegisterHotKey(g_host, HOTKEY_ZOOM, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Z');
-    RegisterHotKey(g_host, HOTKEY_DRAW, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D');
+    // The tools' shortcuts (Ctrl+Alt+H / Z / D unless changed) work from anywhere; RegisterHotKey needs no special rights.
+    RegisterToolKeys();
 
     // Portable use: if the exe was moved, keep "Start with Windows" pointing at its current location.
     if (StartupEnabled()) SetStartup(true);
@@ -1932,7 +2124,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (g_keysWnd && IsDialogMessageW(g_keysWnd, &msg)) continue;  // Tab, Enter and Esc in the shortcuts window
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
 
     for (int id : {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW}) UnregisterHotKey(g_host, id);
     WTSUnRegisterSessionNotification(g_host);
