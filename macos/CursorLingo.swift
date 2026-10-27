@@ -598,7 +598,8 @@ final class AutoFix {
             guard c.count >= 4, c.count % 2 == 0, c[0] == 48 || c[0] == 49, c[1] == 43 || c[1] == 45 else { return nil }
             var keys: [UInt8] = []
             for i in stride(from: 2, to: c.count, by: 2) {
-                guard let k = UInt8(String(decoding: c[i...i+1], as: UTF8.self), radix: 16) else { return nil }
+                // A damaged entry must not feed bad key indices to the detector (47 keys, plus the Shift bit).
+                guard let k = UInt8(String(decoding: c[i...i+1], as: UTF8.self), radix: 16), k & 0x7F < 47 else { return nil }
                 keys.append(k)
             }
             return Rule(keys: keys, shown: Int(c[0] - 48), fix: c[1] == 43)
@@ -775,6 +776,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func systemResumed() {
         autoFix.recover()
+        if Settings.autoFix && !autoFix.isRunning { startAutoFix() }  // retries until the tap can be created again
         refresh(animated: false)
     }
 

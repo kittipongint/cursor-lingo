@@ -14,7 +14,7 @@
 
 - Only the word you are typing and the previous word are kept, in memory, and are dropped as soon as you move on, click, switch apps or use a shortcut.
 - Nothing you type is written to disk, logged or sent anywhere, with one exception you control: the **personal word list**. When you convert or undo a word with double Shift, that word (as the keys pressed) is remembered on this computer so the same choice is made next time. *Forget learned words* in the menu deletes the list. Uninstalling on Windows (installer or Store) removes it, as does `uninstall.sh` on macOS.
-- Password fields and terminal windows are skipped.
+- Password fields: on macOS nothing is read while secure input is on (all standard password fields). On Windows, standard Windows password boxes are skipped; password fields drawn by browsers or other apps cannot be detected while you type, but what you type there is still only held in memory as described above, and before saving a word to the personal word list CursorLingo asks Windows (UI Automation) whether the field is a password field and saves nothing if it is, or if it can't tell. Terminal windows are never fixed automatically.
 - To convert selected text, CursorLingo reads the selection (on macOS through Accessibility when the app supports it, otherwise with a quick copy and paste). Your clipboard is put back afterwards.
 
 **Remember language per app (optional, off by default)** saves the names of apps (for example `code.exe`) with the keyboard layout you last used in them, on this computer only.
@@ -61,7 +61,7 @@ Changes to this policy are published in this file, in the project's public histo
 
 - เก็บไว้แค่คำที่กำลังพิมพ์กับคำก่อนหน้าในหน่วยความจำ และล้างทิ้งทันทีเมื่อพิมพ์ต่อ คลิก สลับแอป หรือกดคีย์ลัด
 - สิ่งที่พิมพ์ไม่ถูกบันทึกลงเครื่อง ไม่ถูกเก็บ log และไม่ถูกส่งไปที่ไหน ยกเว้นสิ่งเดียวที่คุณควบคุมเองได้ คือ **รายการคำส่วนตัว** เมื่อคุณสั่งแก้หรือย้อนคำด้วยการกด Shift 2 ครั้ง คำนั้น (ในรูปของปุ่มที่กด) จะถูกจำไว้ในเครื่องนี้ เพื่อให้ครั้งหน้าทำแบบเดิม เมนู *ล้างคำที่จำไว้* จะลบรายการนี้ การถอนแอปบน Windows (ทั้งตัวติดตั้งและ Store) ก็ลบให้ด้วย รวมถึง `uninstall.sh` บน macOS
-- ไม่ทำงานในช่องรหัสผ่านและหน้าต่าง Terminal
+- ช่องรหัสผ่าน: บน macOS จะไม่อ่านอะไรเลยระหว่างที่ secure input เปิดอยู่ (ครอบคลุมช่องรหัสผ่านมาตรฐานทั้งหมด) บน Windows จะข้ามช่องรหัสผ่านมาตรฐานของ Windows แต่ตรวจไม่เจอช่องรหัสผ่านที่เบราว์เซอร์หรือแอปอื่นวาดขึ้นเอง ถึงอย่างนั้นสิ่งที่พิมพ์ในช่องเหล่านั้นก็ยังเก็บไว้แค่ในหน่วยความจำตามที่อธิบายข้างต้น และก่อนบันทึกคำลงรายการคำส่วนตัว CursorLingo จะถาม Windows (UI Automation) ก่อนว่าช่องนั้นเป็นช่องรหัสผ่านหรือไม่ ถ้าใช่หรือตรวจไม่ได้ จะไม่บันทึก ส่วนหน้าต่าง Terminal จะไม่ถูกแก้คำให้อัตโนมัติ
 - เวลาแปลงข้อความที่เลือก CursorLingo จะอ่านข้อความนั้น (บน macOS ผ่าน Accessibility ถ้าแอปรองรับ ถ้าไม่รองรับจะใช้การ copy และ paste) แล้วคืนค่า clipboard เดิมให้
 
 **จำภาษาของแต่ละแอป (ไม่บังคับ ปิดไว้เป็นค่าเริ่มต้น):** บันทึกชื่อแอป (เช่น `code.exe`) คู่กับแป้นพิมพ์ที่ใช้ล่าสุดในแอปนั้น เก็บในเครื่องนี้เท่านั้น

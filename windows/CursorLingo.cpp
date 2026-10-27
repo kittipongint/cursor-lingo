@@ -27,6 +27,7 @@
 #include <wtsapi32.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <uiautomation.h>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -228,10 +229,13 @@ static void MigrateFromRegistry() {
         g_set.hidden[255] = 0;
         RegCloseKey(k);
         SaveSettings();
-        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\CursorLingo");
+        if (GetFileAttributesW(g_ini) != INVALID_FILE_ATTRIBUTES)  // only once the settings are safely in the file
+            RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\CursorLingo");
     }
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ | KEY_WRITE, &k) ==
-        ERROR_SUCCESS) {
+    // The Store package starts through its StartupTask instead; leave an older install's entry alone there.
+    if (!IsPackaged() &&
+        RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ | KEY_WRITE, &k) ==
+            ERROR_SUCCESS) {
         if (RegQueryValueExW(k, kAppName, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
             SetStartup(true);
             RegDeleteValueW(k, kAppName);
@@ -447,7 +451,7 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 #define WM_APP_TRAY (WM_APP + 2)
 #define WM_APP_FIX (WM_APP + 3)
 #define WM_APP_SELECTION (WM_APP + 4)
-#define WM_APP_SAVE_WORDS (WM_APP + 5)
+#define WM_APP_LEARN (WM_APP + 5)
 enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5 };
 enum {
     ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_QUIT, ID_CODE_EDITORS, ID_REPORT, ID_FORGET_WORDS, ID_PER_APP,
@@ -700,6 +704,11 @@ static bool IsKept(const FixWord& w, bool prefix) {
     return r && !r->fix;
 }
 
+// Words to learn from, handed from the hook to the message loop: checking the focus and writing the file are too
+// slow for the hook.
+static FixWord g_learnJobs[4];
+static int g_learnHead = 0, g_learnTail = 0;
+
 // A word the user just flipped with double Shift. Back to the layout it was typed in: they want it as typed, so
 // it is never fixed again. Into the other layout: fix it by itself from now on.
 static void Learn(const FixWord& w) {
@@ -719,7 +728,37 @@ static void Learn(const FixWord& w) {
     r.shown = (uint8_t)typed.shown;
     r.fix = fix;
     memcpy(r.keys, w.keys, w.n);
-    PostMessageW(g_host, WM_APP_SAVE_WORDS, 0, 0);  // not from inside the hook
+}
+
+// Is the focused field a password box? The classic check only sees Win32 edit controls; browsers and other apps
+// draw their own, which UI Automation reports. When it can't tell, the answer is yes, so nothing is saved.
+static bool FocusedFieldIsPassword() {
+    static const GUID kClsidUIAutomation = {0xff48dba4, 0x60ef, 0x4201, {0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e}};
+    static const GUID kIidIUIAutomation = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
+    static IUIAutomation* uia = nullptr;
+    if (FocusIsPassword()) return true;
+    if (!uia && FAILED(CoCreateInstance(kClsidUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIidIUIAutomation, (void**)&uia)))
+        return true;
+    IUIAutomationElement* focused = nullptr;
+    BOOL password = TRUE;
+    if (SUCCEEDED(uia->GetFocusedElement(&focused)) && focused) {
+        if (FAILED(focused->get_CurrentIsPassword(&password))) password = TRUE;
+        focused->Release();
+    }
+    return password != FALSE;
+}
+
+static void SaveRules();
+
+// Runs from the message loop: learn the flipped words, unless they were typed into a password field.
+static void LearnPending() {
+    bool changed = false;
+    bool password = FocusedFieldIsPassword();
+    while (g_learnHead != g_learnTail) {
+        if (!password) { Learn(g_learnJobs[g_learnHead]); changed = true; }
+        g_learnHead = (g_learnHead + 1) % 4;
+    }
+    if (changed) SaveRules();
 }
 
 // Stored as a small binary file: per word, its length, (layout | fix << 1), then the keys.
@@ -752,33 +791,41 @@ static void LoadRules() {
     for (DWORD i = 0; i + 2 <= len && g_ruleCount < 500;) {
         uint8_t n = buf[i], flags = buf[i + 1];
         if (n == 0 || n > lf::kMaxWord || i + 2 + n > len) break;
-        Rule& r = g_rules[g_ruleCount++];
-        r.n = n;
-        r.shown = flags & 1;
-        r.fix = (flags >> 1) & 1;
-        memcpy(r.keys, buf + i + 2, n);
+        bool valid = true;  // a damaged file must not feed bad key indices to the detector
+        for (int j = 0; j < n; j++) valid = valid && (buf[i + 2 + j] & ~lf::kShiftBit) < lf::kKeyCount;
+        if (valid) {
+            Rule& r = g_rules[g_ruleCount++];
+            r.n = n;
+            r.shown = flags & 1;
+            r.fix = (flags >> 1) & 1;
+            memcpy(r.keys, buf + i + 2, n);
+        }
         i += 2 + n;
     }
 }
 
 // Queues `w` (as it is on screen now) to be flipped to the other layout, and records the flip.
-static void QueueFlip(FixWord& w) {
+static bool QueueFlip(FixWord& w) {
     int next = (g_jobTail + 1) % 4;
-    if (next == g_jobHead) return;  // the user is faster than the message loop: drop it
+    if (next == g_jobHead) return false;  // the user is faster than the message loop: drop it
     g_jobs[g_jobTail] = w;
     g_jobTail = next;
     w.shown = 1 - w.shown;
     w.decided = true;
     if (g_fixLang != w.shown) g_expectLang = w.shown;
     PostMessageW(g_host, WM_APP_FIX, 0, 0);
+    return true;
 }
 
 static void ToggleWord() {
     FixWord* w = g_word.n ? &g_word : (g_last.n ? &g_last : nullptr);
     if (!w) { PostMessageW(g_host, WM_APP_SELECTION, 0, 0); return; }  // nothing typed: convert the selection
-    if (g_fixLang < 0) return;
-    QueueFlip(*w);
-    Learn(*w);
+    if (g_fixLang < 0 || !QueueFlip(*w)) return;
+    int next = (g_learnTail + 1) % 4;
+    if (next == g_learnHead) return;
+    g_learnJobs[g_learnTail] = *w;
+    g_learnTail = next;
+    PostMessageW(g_host, WM_APP_LEARN, 0, 0);
 }
 
 static void EndOfWord() {
@@ -1064,9 +1111,50 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
 static DWORD g_appSwitchUntil = 0;  // a switch we requested is still landing: don't record the old layout
 static HKL g_appSwitchTo = nullptr;
 
+// Kept in memory, read from the file once and written only when a layout changes, so the message loop that also
+// services the keyboard hook never waits on the disk for this.
+struct AppLanguage {
+    wchar_t exe[64];
+    HKL hkl;
+};
+static AppLanguage g_appLangs[256];
+static int g_appLangCount = -1;  // -1: not read yet
+
+static AppLanguage* FindAppLanguage(const wchar_t* exe) {
+    if (g_appLangCount < 0) {
+        static wchar_t section[32767];
+        g_appLangCount = 0;
+        DWORD len = GetPrivateProfileSectionW(L"AppLanguages", section, 32767, g_ini);
+        for (const wchar_t* p = section; p < section + len && *p && g_appLangCount < 256; p += wcslen(p) + 1) {
+            const wchar_t* eq = wcschr(p, L'=');
+            if (!eq || eq - p >= 64) continue;
+            AppLanguage& a = g_appLangs[g_appLangCount++];
+            wcsncpy(a.exe, p, eq - p);
+            a.exe[eq - p] = 0;
+            a.hkl = (HKL)(UINT_PTR)wcstoull(eq + 1, nullptr, 16);
+        }
+    }
+    for (int i = 0; i < g_appLangCount; i++)
+        if (wcscmp(g_appLangs[i].exe, exe) == 0) return &g_appLangs[i];
+    return nullptr;
+}
+
 static void RememberAppLanguage(HKL hkl) {
-    if (!g_set.perAppLanguage || !g_fgExe[0] || !hkl) return;
+    if (!g_set.perAppLanguage || !hkl) return;
     if (GetTickCount() < g_appSwitchUntil && hkl != g_appSwitchTo) return;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    if (pid == GetCurrentProcessId()) return;  // our own menu is in front: not an app's layout
+    ReadForegroundExe();  // the poll can run before the foreground-change event arrives
+    if (!g_fgExe[0]) return;
+    AppLanguage* a = FindAppLanguage(g_fgExe);
+    if (a && a->hkl == hkl) return;
+    if (!a) {
+        if (g_appLangCount == 256) return;
+        a = &g_appLangs[g_appLangCount++];
+        wcscpy(a->exe, g_fgExe);
+    }
+    a->hkl = hkl;
     wchar_t v[24];
     swprintf(v, 24, L"%llx", (unsigned long long)(UINT_PTR)hkl);
     EnsureIni();
@@ -1076,13 +1164,13 @@ static void RememberAppLanguage(HKL hkl) {
 // The foreground app just changed: give it back its layout, or remember the one it has.
 static void ApplyAppLanguage() {
     if (!g_set.perAppLanguage || !g_fgExe[0]) return;
-    wchar_t v[24];
     HKL now = CurrentHkl();
-    if (!GetPrivateProfileStringW(L"AppLanguages", g_fgExe, L"", v, 24, g_ini)) {
+    const AppLanguage* a = FindAppLanguage(g_fgExe);
+    if (!a) {
         RememberAppLanguage(now);
         return;
     }
-    HKL want = (HKL)(UINT_PTR)wcstoull(v, nullptr, 16);
+    HKL want = a->hkl;
     HKL list[64];
     int n = GetKeyboardLayoutList(64, list), i = 0;
     while (i < n && list[i] != want) i++;
@@ -1123,7 +1211,7 @@ static void AddTrayIcon() {
 static void ReinstallHooks() {
     if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, g_inst, 0);
-    if (g_kbHook) { SetAutoFix(false); SetAutoFix(true); }
+    if (g_set.autoFix) { SetAutoFix(false); SetAutoFix(true); }  // also retries a hook that failed to install
     g_shiftDown = g_shiftClean = false;
     g_lastShiftTap = 0;
     ClassifyForeground();
@@ -1193,8 +1281,7 @@ static void ShowMenu() {
     if (cmd == ID_FORGET_WORDS) { g_ruleCount = 0; SaveRules(); return; }
     if (cmd == ID_PER_APP) {
         g_set.perAppLanguage = !g_set.perAppLanguage;
-        SaveSettings();
-        RememberAppLanguage(CurrentHkl());
+        SaveSettings();  // the first app is remembered when it comes back to the front
         return;
     }
     if (cmd >= ID_UILANG_BASE && cmd < ID_UILANG_BASE + 3) {
@@ -1270,8 +1357,8 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_SELECTION:
             BeginSelectionCopy();
             return 0;
-        case WM_APP_SAVE_WORDS:
-            SaveRules();
+        case WM_APP_LEARN:
+            LearnPending();
             return 0;
         case WM_TIMER:
             if (wp == TIMER_COPY) CheckSelectionCopy();
