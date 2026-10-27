@@ -18,9 +18,21 @@ physical footprint (`footprint`), which is what Activity Monitor calls Memory.
 | 41–43 MB preferences file (see below), first launch | 0.05 % | 23–40 MB | No crash. The file is cleaned up and saved back: 44–46 KB. |
 | Same, next launch | 0.00 % | 15–16 MB | Back to normal. |
 | Every preference of the wrong type | 0.00–0.05 % | 15–16 MB | No crash; each falls back to its default. |
+| Draw on Screen on, pointer still | 0 % | 17 MB | Turning it on costs 0.02 s of CPU. Two screens, a drawing layer on each. |
+| Drawing without a stop for 20 s, a new stroke every 2 s | ~9 % | 17 MB | Strokes are shape layers: memory doesn't grow with them. ⌘Z and Esc leave 17 MB, no layer behind. |
+| Zoom on, pointer still | ~5 % | 17 MB | It captures the screen while on: other apps redrawing (here, a chat streaming text) mean new frames. Unchanged frames are skipped. |
+| Zoom on, pointer moving | ~14 % | 17 MB | The same at 2× and after zooming in twice with ⌃⌥=. |
+| Zoom on and off 20 times, then on with the pointer moving for 60 s | – | 17 MB throughout | No growth. |
+| Settings window open | – | 44–47 MB | Most of the extra 28 MB is AppKit's own: the toolbar tabs, pop-up buttons and switches are SwiftUI-backed on macOS 27. |
+| Settings closed and opened 12 times | – | 54–56 MB, level | The pages are emptied when the window closes and the number of controls stays the same; the rest is AppKit's caches, kept until CursorLingo quits. |
 
-Not measured yet: zoom (it captures the screen while on, so it costs more than the other tools; the test build had no
-Screen Recording permission) and drawing on screen.
+Zoom and drawing were measured with [`tests/perf/drive.swift`](perf/drive.swift), which presses the tools'
+shortcuts and moves or drags the pointer (`swiftc -O tests/perf/drive.swift -o /tmp/drive && /tmp/drive key ctrl+opt+z`,
+then `drive move 20`, `drive drag 20`, `drive key esc`). Zoom needs Screen Recording for the build being measured.
+
+Found while measuring the Settings window: on macOS 27, AppKit keeps every view of a closed window alive (an
+observer from `-[NSView _commonAwake]` holds them), so making a new window each time it opens would add a full set
+of pages every time. The window is made once; its pages are emptied when it closes and built again when it opens.
 
 The 43 MB preferences file holds 220,000 words (17,500 of them damaged), layouts for 100,000 apps, colours for
 50,000 languages, 50,000 hidden languages, shortcuts no key press can make (negative, too large, three numbers), a

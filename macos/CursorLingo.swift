@@ -2021,6 +2021,15 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         window?.makeFirstResponder(nil)  // a shortcut box still listening lets go, and the shortcuts come back
         NSColorPanel.shared.close()
+        // Empty the pages once it has closed: show() fills them again. (The window itself stays: on macOS 27 AppKit
+        // keeps a closed window's views alive, so a new window each time would only add up.)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window?.isVisible != true else { return }
+            for item in self.tabs.tabViewItems { item.viewController?.view.subviews = [] }
+            self.wells = []
+            self.resets = []
+            self.shortcutFields = [:]
+        }
     }
 
     // MARK: Building blocks
