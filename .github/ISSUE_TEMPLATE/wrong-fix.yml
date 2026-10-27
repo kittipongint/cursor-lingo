@@ -1,0 +1,54 @@
+name: Wrong fix or missed fix
+description: Auto-fix changed a word it shouldn't have, or left a wrong-layout word alone.
+title: "Auto-fix: "
+labels: ["auto-fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! These reports are how the detector gets better. Please only share words you are happy to make public.
+        ขอบคุณที่ช่วยรายงานครับ เขียนเป็นภาษาไทยได้เลย (กรุณาใส่เฉพาะคำที่เปิดเผยได้)
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened?
+      options:
+        - It changed a word I meant to type (wrong fix)
+        - It didn't fix a word typed in the wrong layout (missed fix)
+    validations:
+      required: true
+  - type: input
+    id: text
+    attributes:
+      label: Text as it appeared on screen (before any fix)
+      placeholder: "e.g. l;ylfu  or  ะ้รห"
+    validations:
+      required: true
+  - type: dropdown
+    id: layout
+    attributes:
+      label: Keyboard layout when you typed it
+      options:
+        - English (US / ABC)
+        - Thai (Kedmanee)
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: What you wanted
+      placeholder: "e.g. สวัสดี"
+  - type: input
+    id: app
+    attributes:
+      label: App you were typing in
+      placeholder: "e.g. Slack, VS Code, Word, Chrome"
+  - type: input
+    id: version
+    attributes:
+      label: CursorLingo version and OS
+      placeholder: "e.g. 1.2.0 on macOS 15 / Windows 11"
+  - type: markdown
+    attributes:
+      value: |
+        Want to fix it yourself? Add the word to `tests/cases.tsv` (see CONTRIBUTING.md) and open a pull request.

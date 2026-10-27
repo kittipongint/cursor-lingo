@@ -1,0 +1,40 @@
+name: Bug report
+description: Something doesn't work (badge, menu, permissions, double Shift, after sleep, ...).
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Turn on Auto-fix
+        2. Type ... in ...
+  - type: input
+    id: version
+    attributes:
+      label: CursorLingo version
+      placeholder: "e.g. 1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "e.g. macOS 15.1 (Apple Silicon) / Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: App you were typing in (if relevant)
+  - type: textarea
+    id: status
+    attributes:
+      label: Status line under "Auto-fix" in the menu (macOS)
+      placeholder: "e.g. Active · double-tap Shift: ..."

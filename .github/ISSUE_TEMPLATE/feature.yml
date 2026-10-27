@@ -1,0 +1,14 @@
+name: Idea or feature request
+description: Suggest an improvement (another layout, an app that needs special handling, ...).
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: How do you work around it today?
