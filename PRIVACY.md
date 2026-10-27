@@ -8,7 +8,7 @@
 
 ## What the app does on your computer
 
-**Language badge.** To show your input language next to the pointer, CursorLingo reads the current keyboard layout and the pointer position. These are used immediately and never stored. With the *Presentation* tools on, the position of each mouse click is used to draw a ripple there, and the mouse wheel is watched only while Control and Option (Ctrl and Alt) are held, to resize the circle. *Zoom* shows the screen around the pointer, magnified: it reads the screen image only while zoom is on, only to draw it in the circle, and never saves or sends it. Lines you draw with *Draw on Screen* are kept in memory until you stop drawing. The *Shortcuts* window reads the keys you press only while one of its boxes is selected, to set a shortcut. Nothing of this is kept, except the shortcuts you choose.
+**Language badge.** To show your input language next to the pointer, CursorLingo reads the current keyboard layout and the pointer position. These are used immediately and never stored. With the *Presentation* tools on, the position of each mouse click is used to draw a ripple there, and the mouse wheel is watched only while Control and Option (Ctrl and Alt) are held, to resize the circle. *Zoom* shows the screen around the pointer, magnified: it reads the screen image only while zoom is on, only to draw it in the circle, and never saves or sends it. Lines you draw with *Draw on Screen* are kept in memory until you stop drawing. The shortcut boxes in *Settings → Presentation* read the keys you press only while one of them is selected, to set a shortcut. Nothing of this is kept, except the shortcuts and badge colours you choose.
 
 **Fix Wrong Language (optional, off by default).** When you turn it on (*Double Shift Only* or *Automatic*), CursorLingo watches the keys you press so it can notice a word typed in the wrong layout (English ⇄ Thai) and type it again in the right one.
 
@@ -55,7 +55,7 @@ Changes to this policy are published in this file, in the project's public histo
 
 ## แอปทำอะไรในเครื่องของคุณ
 
-**ป้ายบอกภาษา:** เพื่อแสดงภาษาที่ใช้อยู่ข้างตัวชี้เมาส์ CursorLingo อ่านแป้นพิมพ์ที่ใช้อยู่และตำแหน่งเมาส์ ใช้ทันทีและไม่ได้บันทึกไว้ เมื่อเปิดเครื่องมือ *นำเสนอ* จะใช้ตำแหน่งที่คลิกเมาส์เพื่อวาดวงคลื่นตรงนั้น และดูล้อเมาส์เฉพาะตอนกด Control กับ Option (Ctrl กับ Alt) ค้างไว้ เพื่อปรับขนาดวง *ซูม* จะแสดงภาพบนจอรอบเมาส์แบบขยาย โดยอ่านภาพหน้าจอเฉพาะตอนเปิดซูม เพื่อวาดในวงกลมเท่านั้น ไม่บันทึกและไม่ส่งไปไหน เส้นที่วาดด้วย *วาดบนจอ* อยู่ในหน่วยความจำจนกว่าจะเลิกวาด หน้าต่าง *ตั้งคีย์ลัด* อ่านคีย์ที่กดเฉพาะตอนเลือกช่องใดช่องหนึ่งอยู่ เพื่อตั้งคีย์ลัด ทั้งหมดนี้ไม่ได้เก็บไว้ ยกเว้นคีย์ลัดที่คุณเลือก
+**ป้ายบอกภาษา:** เพื่อแสดงภาษาที่ใช้อยู่ข้างตัวชี้เมาส์ CursorLingo อ่านแป้นพิมพ์ที่ใช้อยู่และตำแหน่งเมาส์ ใช้ทันทีและไม่ได้บันทึกไว้ เมื่อเปิดเครื่องมือ *นำเสนอ* จะใช้ตำแหน่งที่คลิกเมาส์เพื่อวาดวงคลื่นตรงนั้น และดูล้อเมาส์เฉพาะตอนกด Control กับ Option (Ctrl กับ Alt) ค้างไว้ เพื่อปรับขนาดวง *ซูม* จะแสดงภาพบนจอรอบเมาส์แบบขยาย โดยอ่านภาพหน้าจอเฉพาะตอนเปิดซูม เพื่อวาดในวงกลมเท่านั้น ไม่บันทึกและไม่ส่งไปไหน เส้นที่วาดด้วย *วาดบนจอ* อยู่ในหน่วยความจำจนกว่าจะเลิกวาด ช่องคีย์ลัดใน *ตั้งค่า → นำเสนอ* อ่านคีย์ที่กดเฉพาะตอนเลือกช่องนั้นอยู่ เพื่อตั้งคีย์ลัด ทั้งหมดนี้ไม่ได้เก็บไว้ ยกเว้นคีย์ลัดและสีป้ายที่คุณเลือก
 
 **แก้คำที่พิมพ์ผิดภาษา (ไม่บังคับ ปิดไว้เป็นค่าเริ่มต้น):** เมื่อเปิดใช้ (*กด Shift 2 ครั้งเพื่อแก้* หรือ *แก้ให้อัตโนมัติ*) CursorLingo จะดูปุ่มที่คุณกด เพื่อจับคำที่พิมพ์ผิดภาษา (อังกฤษ ⇄ ไทย) แล้วพิมพ์ใหม่ให้ถูก
 

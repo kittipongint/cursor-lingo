@@ -29,6 +29,8 @@
 #include <shobjidl.h>
 #include <uiautomation.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <winver.h>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -71,8 +73,13 @@ struct Settings {
     DWORD spotRadius = 100;     // spotlight radius in points (40..300)
     DWORD zoomLevel = 20;       // zoom lens magnification, in tenths (15..80)
     DWORD keySpotlight = 0x648, keyZoom = 0x65A, keyDraw = 0x644;  // tool shortcuts (see RegisterToolKeys), Ctrl+Alt+H/Z/D
+    DWORD badgeBorder = 1;      // the badge's thin border and shadow
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
+
+// The Settings window (see below) shows the open tab again when something it shows changes.
+enum { TAB_BADGE, TAB_FIX, TAB_PRESENT, TAB_GENERAL, TAB_COUNT };
+static void SettingsReload(int tab);
 
 // ---------------------------------------------------------------------------
 // Settings storage: plain files in the user's profile, never the registry
@@ -104,6 +111,7 @@ static const SettingField kFields[] = {
     {L"ShortcutSpotlight", &g_set.keySpotlight, 0x648, 0x10000},
     {L"ShortcutZoom", &g_set.keyZoom, 0x65A, 0x10000},
     {L"ShortcutDraw", &g_set.keyDraw, 0x644, 0x10000},
+    {L"BadgeBorder", &g_set.badgeBorder, 1, 2},
 };
 
 static void FindSettingsFiles() {
@@ -133,7 +141,53 @@ static void EnsureIni() {
     CloseHandle(f);
 }
 
+// Badge colours picked in Settings, by language code; stored in the [Colors] section as RRGGBB.
+struct CustomColor {
+    wchar_t code[4];
+    COLORREF c;
+};
+static CustomColor g_colors[32];
+static int g_colorCount = 0;
+
+static const CustomColor* FindColor(const wchar_t* code) {
+    for (int i = 0; i < g_colorCount; i++)
+        if (wcscmp(g_colors[i].code, code) == 0) return &g_colors[i];
+    return nullptr;
+}
+
+// CLR_NONE goes back to the language's own colour.
+static void SetColor(const wchar_t* code, COLORREF c) {
+    int i = 0;
+    while (i < g_colorCount && wcscmp(g_colors[i].code, code) != 0) i++;
+    if (c == CLR_NONE) {
+        if (i < g_colorCount) g_colors[i] = g_colors[--g_colorCount];
+    } else if (i < g_colorCount || g_colorCount < 32) {
+        if (i == g_colorCount) wcscpy(g_colors[g_colorCount++].code, code);
+        g_colors[i].c = c;
+    }
+    EnsureIni();
+    wchar_t hex[8];
+    swprintf(hex, 8, L"%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    WritePrivateProfileStringW(L"Colors", code, c == CLR_NONE ? nullptr : hex, g_ini);
+}
+
+static void LoadColors() {
+    static wchar_t buf[2048];
+    g_colorCount = 0;
+    GetPrivateProfileSectionW(L"Colors", buf, 2048, g_ini);
+    for (const wchar_t* line = buf; *line && g_colorCount < 32; line += wcslen(line) + 1) {
+        const wchar_t* eq = wcschr(line, L'=');
+        if (!eq || eq - line < 1 || eq - line > 3 || wcslen(eq + 1) != 6) continue;
+        unsigned long v = wcstoul(eq + 1, nullptr, 16);
+        CustomColor& c = g_colors[g_colorCount++];
+        wcsncpy(c.code, line, eq - line);
+        c.code[eq - line] = 0;
+        c.c = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+    }
+}
+
 static void LoadSettings() {
+    LoadColors();
     for (const SettingField& f : kFields) {
         UINT v = GetPrivateProfileIntW(L"Settings", f.name, (INT)f.def, g_ini);
         *f.value = v < f.max ? v : f.def;
@@ -297,6 +351,18 @@ static HKL CurrentHkl() {
     return GetKeyboardLayout(tid);
 }
 
+// Two or three letter code of a layout's language: "EN", "TH" ("??" if unknown).
+static void CodeOf(HKL hkl, wchar_t* code) {
+    wchar_t name[LOCALE_NAME_MAX_LENGTH] = L"";
+    wcscpy(code, L"??");
+    if (LCIDToLocaleName(MAKELCID(LOWORD((UINT_PTR)hkl), SORT_DEFAULT), name, LOCALE_NAME_MAX_LENGTH, 0) > 0) {
+        int i = 0;
+        for (; i < 3 && name[i] && name[i] != L'-'; i++) code[i] = (wchar_t)towupper(name[i]);
+        code[i] = 0;
+        if (i == 0) wcscpy(code, L"??");
+    }
+}
+
 // Returns true when the language code changed.
 static bool UpdateLanguage() {
     HKL hkl = CurrentHkl();
@@ -306,14 +372,8 @@ static bool UpdateLanguage() {
     if (g_expectLang >= 0 && g_fixLang == g_expectLang) g_expectLang = -1;  // our own switch
     else if (!(g_word.n && g_word.shown == g_fixLang)) ResetWords();         // a word never spans the user's
 
-    wchar_t name[LOCALE_NAME_MAX_LENGTH] = L"";
-    wchar_t code[4] = L"??";
-    if (LCIDToLocaleName(MAKELCID(LOWORD((UINT_PTR)hkl), SORT_DEFAULT), name, LOCALE_NAME_MAX_LENGTH, 0) > 0) {
-        int i = 0;
-        for (; i < 3 && name[i] && name[i] != L'-'; i++) code[i] = (wchar_t)towupper(name[i]);
-        code[i] = 0;
-        if (i == 0) wcscpy(code, L"??");
-    }
+    wchar_t code[4];
+    CodeOf(hkl, code);
     if (wcscmp(code, g_code) == 0) return false;
     wcscpy(g_code, code);
     return true;
@@ -326,6 +386,8 @@ static bool UpdateLanguage() {
 struct Rgb { float r, g, b; };
 
 static Rgb AccentFor(const wchar_t* code) {
+    if (const CustomColor* own = FindColor(code))
+        return {GetRValue(own->c) / 255.0f, GetGValue(own->c) / 255.0f, GetBValue(own->c) / 255.0f};
     struct { const wchar_t* c; Rgb rgb; } known[] = {
         {L"EN", {0.20f, 0.68f, 0.40f}}, {L"TH", {0.17f, 0.45f, 0.95f}}, {L"JA", {0.90f, 0.25f, 0.30f}},
         {L"ZH", {0.95f, 0.55f, 0.10f}}, {L"KO", {0.58f, 0.35f, 0.90f}}, {L"RU", {0.10f, 0.65f, 0.75f}},
@@ -384,6 +446,8 @@ struct Bitmap {
 // The badge occupies a bw×bh box centred in the bitmap; the rest is room for the shadow.
 static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int bh, float fontPx, bool shadow) {
     const Rgb accent = AccentFor(code);
+    const bool edge = g_set.badgeBorder != 0;  // off: no border, no white ring round the dot, no shadow
+    shadow = shadow && edge;
     Rgb fill, text, border;
     float borderW = 0.75f, borderA = 0.22f;
     switch (style) {
@@ -391,6 +455,7 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
         case STYLE_DARK: fill = {0.1f, 0.1f, 0.1f}; text = {1, 1, 1}; border = accent; borderW = 1.25f; borderA = 1; break;
         default: fill = accent; text = {1, 1, 1}; border = {0, 0, 0}; break;
     }
+    if (!edge) borderA = 0;
     const float fillA = style == STYLE_DARK ? 0.93f : (style == STYLE_LIGHT ? 0.96f : 1.0f);
     const float cx = out.w / 2.0f, cy = out.h / 2.0f, hw = bw / 2.0f, hh = bh / 2.0f;
     const bool dot = style == STYLE_DOT;
@@ -428,7 +493,7 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
                 float ca;
                 if (dot) {
                     // white ring + coloured core
-                    float core = Clamp01(0.5f - (d + 1.5f));
+                    float core = edge ? Clamp01(0.5f - (d + 1.5f)) : 1;
                     c = {fill.r * core + (1 - core), fill.g * core + (1 - core), fill.b * core + (1 - core)};
                     ca = 1;
                 } else {
@@ -469,12 +534,7 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5, TIMER_RIPPLE = 6, TIMER_SPIN = 7, TIMER_SAVE = 8,
        TIMER_LENS = 9 };
 enum { HOTKEY_PRESENTATION = 1, HOTKEY_ESCAPE, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO };
-enum {
-    ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_QUIT, ID_CODE_EDITORS, ID_REPORT, ID_FORGET_WORDS, ID_PER_APP,
-    ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS,
-    ID_FIX_BASE = 150, ID_UILANG_BASE = 160,
-    ID_STYLE_BASE = 200, ID_MODE_BASE = 300, ID_SIZE_BASE = 400,
-};
+enum { ID_QUIT = 100, ID_SETTINGS, ID_PRESENTATION, ID_ZOOM, ID_DRAW, ID_SHORTCUTS, ID_FIX_BASE = 150 };
 
 static HINSTANCE g_inst;
 static HWND g_badge, g_host;
@@ -492,7 +552,8 @@ static RECT g_monRect = {1, 1, 0, 0}, g_workRect;
 static NOTIFYICONDATAW g_nid;
 static HICON g_trayIcon;
 
-static float Scale() { return kSizeScale[g_set.size] * g_dpi / 96.0f; }
+static float DpiScaleOf(UINT dpi) { return dpi / 96.0f; }
+static float Scale() { return kSizeScale[g_set.size] * DpiScaleOf(g_dpi); }
 
 static void Present(bool includePos) {
     if (!g_img.px) return;
@@ -756,11 +817,13 @@ static void UpdateCircle() {
 static void SetPresentation(bool on) {
     g_set.presentation = on;
     UpdateCircle();
+    SettingsReload(TAB_PRESENT);
 }
 
 static void SetZoom(bool on) {
     g_zoom = on && MakeLens();
     UpdateCircle();
+    SettingsReload(TAB_PRESENT);
 }
 
 // The drawing layer: a per-pixel-alpha window over all monitors. Its empty pixels are alpha 1/255, invisible but
@@ -817,6 +880,7 @@ static void SetDrawing(bool on) {
         }
     }
     UpdatePresentKeys();
+    SettingsReload(TAB_PRESENT);
 }
 
 static void UndoStroke() {
@@ -873,6 +937,7 @@ static void ResizeSpotlight(int delta) {
     PaintHalo();
     MoveHalo();
     SetTimer(g_host, TIMER_SAVE, 1000, nullptr);  // save once the wheel stops
+    SettingsReload(TAB_PRESENT);
 }
 
 // Ctrl+Alt+= / -: a quarter more or a fifth less, between 1.5x and 8x.
@@ -883,6 +948,7 @@ static void StepZoom(bool in) {
     ApplyZoomLevel();
     MoveLens();
     SetTimer(g_host, TIMER_SAVE, 1000, nullptr);
+    SettingsReload(TAB_PRESENT);
 }
 
 // Runs from the message loop: start a ripple at `at` (screen pixels).
@@ -1080,6 +1146,10 @@ static void ReadForegroundExe() {
 }
 
 // Identifiers often look like gibberish, so code editors are left to double Shift (when that option is on).
+// The Settings window names them: keep these lists in step with the ones checked here and in ForegroundIsTerminal.
+static const wchar_t kCodeEditorNames[] = L"VS Code, VSCodium, Cursor, Windsurf, Zed, Visual Studio, Sublime Text, Notepad++, "
+                                          L"Android Studio, JetBrains IDEs (IntelliJ IDEA, PyCharm, WebStorm\u2026), Fleet, gVim";
+static const wchar_t kTerminalNames[] = L"Command Prompt, PowerShell, Windows Terminal, Git Bash";
 static bool ForegroundIsCodeEditor() {
     static const wchar_t* kEditors[] = {
         L"code.exe", L"code - insiders.exe", L"vscodium.exe", L"cursor.exe", L"windsurf.exe", L"zed.exe",
@@ -1172,7 +1242,10 @@ static void LearnPending() {
         if (!password) { Learn(g_learnJobs[g_learnHead]); changed = true; }
         g_learnHead = (g_learnHead + 1) % 4;
     }
-    if (changed) SaveRules();
+    if (changed) {
+        SaveRules();
+        SettingsReload(TAB_FIX);
+    }
 }
 
 // Stored as a small binary file: per word, its length, (layout | fix << 1), then the keys.
@@ -1644,11 +1717,11 @@ static void ReinstallHooks() {
 }
 
 // ---------------------------------------------------------------------------
-// Shortcuts of the presentation tools, and the window to change them
+// Shortcuts of the presentation tools
 // ---------------------------------------------------------------------------
 //
 // A shortcut is stored as the hotkey control gives it: the virtual key in the low byte, HOTKEYF_* in the high byte
-// (0 = none). The window uses Windows' own hotkey control, which reads the keys only while it has the focus.
+// (0 = none). Settings changes them with Windows' own hotkey control, which reads the keys only while it has the focus.
 
 static const int kToolHotkeys[3] = {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW};
 static const WORD kToolDefaults[3] = {MAKEWORD('H', HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD('Z', HOTKEYF_CONTROL | HOTKEYF_ALT),
@@ -1694,147 +1767,799 @@ static void KeyText(DWORD k, wchar_t* out, int n) {
              f & HOTKEYF_SHIFT ? L"Shift+" : L"", name);
 }
 
-enum { IDC_KEY_BASE = 1000, IDC_RESTORE = 1010 };
-static HWND g_keysWnd, g_keyCtl[3];
-static HFONT g_keysFont;
+// ---------------------------------------------------------------------------
+// Settings window
+// ---------------------------------------------------------------------------
+//
+// One window with a tab for each part of the app, built from plain Win32 controls. The page of the open tab is built
+// again from the settings whenever something changes, here or elsewhere (the tray menu, a shortcut), so it never
+// shows a stale value. Layout is in 96-dpi units, scaled to the window's monitor.
 
-// OK: refuses a shortcut used twice, or one the tools need while on; then registers, and keeps the old ones if
-// another app holds any of the new keys.
-static bool ApplyKeys() {
-    DWORD keys[3];
-    for (int i = 0; i < 3; i++) keys[i] = (WORD)SendMessageW(g_keyCtl[i], HKM_GETHOTKEY, 0, 0);
-    const WORD reserved[] = {MAKEWORD(VK_OEM_PLUS, HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD(VK_OEM_MINUS, HOTKEYF_CONTROL | HOTKEYF_ALT),
-                             MAKEWORD('Z', HOTKEYF_CONTROL)};
-    wchar_t text[32], msg[256];
-    for (int i = 0; i < 3; i++) {
-        if (!keys[i]) continue;
-        KeyText(keys[i], text, 32);
-        for (WORD r : reserved)
-            if (keys[i] == r) {
-                swprintf(msg, 256, TR(L"%ls is used while a tool is on. Pick another.", L"%ls ใช้อยู่ตอนเปิดเครื่องมือ เลือกคีย์อื่น"), text);
-                MessageBoxW(g_keysWnd, msg, kAppName, MB_ICONWARNING);
-                return false;
+enum {
+    CTL_CAPTION = 2000, CTL_STATUS, CTL_PREVIEW, CTL_MODE, CTL_STYLE, CTL_SIZE, CTL_BORDER,
+    CTL_FIX_BASE = 2100, CTL_EDITORS = 2110, CTL_FORGET, CTL_PER_APP,
+    CTL_TOOL_BASE = 2200, CTL_KEY_BASE = 2210, CTL_RESTORE = 2220, CTL_RADIUS, CTL_ZOOM_LEVEL, CTL_RADIUS_VALUE, CTL_ZOOM_VALUE,
+    CTL_STARTUP = 2300, CTL_UI_LANG, CTL_REPORT, CTL_STAR, CTL_CONTRIBUTE,
+    CTL_COLOR_BASE = 2400, CTL_DEFAULT_BASE = 2500, CTL_SHOW_BASE = 2600, kMaxRows = 64,
+};
+#define WM_APP_RELOAD (WM_APP + 20)
+static const wchar_t* kTabNames[2][4] = {{L"Badge", L"Fix Wrong Language", L"Presentation", L"General"},
+                                         {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"นำเสนอ", L"ทั่วไป"}};
+
+static HWND g_setWnd, g_setTabs, g_setPage;
+static int g_setTab = TAB_BADGE;
+static UINT g_setDpi = 96;
+static HFONT g_fontText, g_fontBold, g_fontHead;
+static bool g_setActive = false, g_keysPaused = false, g_reloadPosted = false;
+static wchar_t g_keyStatus[128];  // the last shortcut problem, shown under the tools
+
+// The keyboards added in Windows, one row per language code.
+struct LangRow {
+    wchar_t code[4];
+    wchar_t names[128];
+};
+static std::vector<LangRow> g_langRows;
+
+// Name of a keyboard layout as Windows shows it ("US", "Thai Kedmanee"), read from its entry under Keyboard Layouts.
+static void LayoutName(HKL hkl, wchar_t* out, int n) {
+    out[0] = 0;
+    const WORD dev = HIWORD((UINT_PTR)hkl);
+    const wchar_t* root = L"SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts";
+    wchar_t klid[16] = L"";
+    if ((dev & 0xF000) == 0xF000) {  // a variant of a layout: the entry with its Layout Id
+        HKEY k;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, root, 0, KEY_READ, &k) == ERROR_SUCCESS) {
+            wchar_t want[8], sub[16], id[8];
+            swprintf(want, 8, L"%04x", dev & 0x0FFF);
+            for (DWORD i = 0; !klid[0]; i++) {
+                DWORD cch = 16, cb = sizeof(id);
+                if (RegEnumKeyExW(k, i, sub, &cch, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+                if (RegGetValueW(k, sub, L"Layout Id", RRF_RT_REG_SZ, nullptr, id, &cb) == ERROR_SUCCESS && _wcsicmp(id, want) == 0)
+                    wcscpy(klid, sub);
             }
-        for (int j = i + 1; j < 3; j++)
-            if (keys[i] == keys[j]) {
-                swprintf(msg, 256, TR(L"%ls is set for two tools.", L"%ls ถูกตั้งไว้ให้สองเครื่องมือ"), text);
-                MessageBoxW(g_keysWnd, msg, kAppName, MB_ICONWARNING);
-                return false;
-            }
+            RegCloseKey(k);
+        }
+    } else if ((dev & 0xF000) == 0xE000) {  // an old-style IME
+        swprintf(klid, 16, L"%08X", (unsigned)(UINT_PTR)hkl);
+    } else {
+        swprintf(klid, 16, L"%08X", (unsigned)dev);
     }
-    DWORD old[3];
-    for (int i = 0; i < 3; i++) {
-        old[i] = *ToolKey(i);
-        *ToolKey(i) = keys[i];
+    if (!klid[0]) return;
+    wchar_t path[128];
+    swprintf(path, 128, L"%ls\\%ls", root, klid);
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &k) != ERROR_SUCCESS) return;
+    if (RegLoadMUIStringW(k, L"Layout Display Name", out, n * sizeof(wchar_t), nullptr, 0, nullptr) != ERROR_SUCCESS) {
+        DWORD cb = (n - 1) * sizeof(wchar_t);
+        if (RegQueryValueExW(k, L"Layout Text", nullptr, nullptr, (BYTE*)out, &cb) != ERROR_SUCCESS) cb = 0;
+        out[cb / sizeof(wchar_t)] = 0;
     }
-    int failed = RegisterToolKeys();
-    UnregisterToolKeys();  // the window is still open; they come back when it closes
-    if (failed) {
-        for (int i = 0; i < 3; i++) *ToolKey(i) = old[i];
-        wchar_t list[128] = L"";
-        for (int i = 0; i < 3; i++)
-            if (failed & (1 << i)) {
-                KeyText(keys[i], text, 32);
-                if (list[0]) wcscat(list, L", ");
-                wcscat(list, text);
-            }
-        swprintf(msg, 256, TR(L"Another app already uses %ls. Pick another.", L"มีแอปอื่นใช้ %ls อยู่แล้ว เลือกคีย์อื่น"), list);
-        MessageBoxW(g_keysWnd, msg, kAppName, MB_ICONWARNING);
-        return false;
-    }
-    SaveSettings();
-    return true;
+    RegCloseKey(k);
 }
 
-static LRESULT CALLBACK KeysProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+static void ReadLanguages() {
+    g_langRows.clear();
+    HKL list[64];
+    int n = GetKeyboardLayoutList(64, list);
+    for (int i = 0; i < n; i++) {
+        wchar_t code[4], name[96];
+        CodeOf(list[i], code);
+        LayoutName(list[i], name, 96);
+        LangRow* row = nullptr;
+        for (LangRow& r : g_langRows)
+            if (wcscmp(r.code, code) == 0) row = &r;
+        if (!row) {
+            if (g_langRows.size() >= (size_t)kMaxRows) continue;
+            g_langRows.push_back({});
+            row = &g_langRows.back();
+            wcscpy(row->code, code);
+        }
+        if (name[0] && !wcsstr(row->names, name) && wcslen(row->names) + wcslen(name) + 3 < 128) {
+            if (row->names[0]) wcscat(row->names, L", ");
+            wcscat(row->names, name);
+        }
+    }
+}
+
+// "1.1.5", from the exe's own version resource.
+static void AppVersion(wchar_t* out, int n) {
+    wcscpy(out, L"?");
+    HRSRC r = FindResourceW(nullptr, MAKEINTRESOURCEW(1), RT_VERSION);
+    HGLOBAL g = r ? LoadResource(nullptr, r) : nullptr;
+    const BYTE* p = g ? (const BYTE*)LockResource(g) : nullptr;
+    const DWORD size = r ? SizeofResource(nullptr, r) : 0;
+    for (DWORD i = 0; p && i + sizeof(VS_FIXEDFILEINFO) <= size; i += 4) {
+        const VS_FIXEDFILEINFO* fi = (const VS_FIXEDFILEINFO*)(p + i);
+        if (fi->dwSignature != 0xFEEF04BD) continue;
+        swprintf(out, n, L"%u.%u.%u", HIWORD(fi->dwProductVersionMS), LOWORD(fi->dwProductVersionMS), HIWORD(fi->dwProductVersionLS));
+        break;
+    }
+}
+
+static void OpenUrl(const wchar_t* url) { ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL); }
+
+// Off, Double Shift only, Automatic: stored as AutoFix (on/off) + FixAsYouType, so older settings carry over.
+static void SetFixMode(int pick) {
+    g_set.autoFix = pick != 0;
+    if (pick) g_set.fixAsYouType = pick == 2;
+    SetAutoFix(g_set.autoFix != 0);
+    SaveSettings();
+}
+
+// The tools' shortcuts are released while the Presentation tab is in front, so pressing one reaches its box.
+static void UpdateKeyPause() {
+    bool pause = g_setWnd && g_setActive && g_setTab == TAB_PRESENT;
+    if (pause == g_keysPaused) return;
+    g_keysPaused = pause;
+    if (pause) UnregisterToolKeys();
+    else RegisterToolKeys();
+}
+
+// Rebuilds the page soon, if the window is open (on `tab`, or on any tab for -1).
+static void SettingsReload(int tab) {
+    if (!g_setWnd || (tab >= 0 && tab != g_setTab) || g_reloadPosted) return;
+    g_reloadPosted = true;
+    PostMessageW(g_setWnd, WM_APP_RELOAD, 0, 0);
+}
+
+static void DeleteFonts() {
+    for (HFONT* f : {&g_fontText, &g_fontBold, &g_fontHead}) {
+        if (*f) DeleteObject(*f);
+        *f = nullptr;
+    }
+}
+
+static void MakeFonts() {
+    DeleteFonts();
+    NONCLIENTMETRICSW ncm = {sizeof(ncm)};
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, g_setDpi);
+    LOGFONTW lf = ncm.lfMessageFont;
+    g_fontText = CreateFontIndirectW(&lf);
+    lf.lfWeight = FW_SEMIBOLD;
+    g_fontBold = CreateFontIndirectW(&lf);
+    lf.lfHeight = lf.lfHeight * 6 / 5;
+    g_fontHead = CreateFontIndirectW(&lf);
+}
+
+static COLORREF ToRef(Rgb c) { return RGB(std::lround(c.r * 255), std::lround(c.g * 255), std::lround(c.b * 255)); }
+
+// Puts controls on the page from top to bottom; `y` is where the next one goes.
+struct Page {
+    HWND wnd;
+    int y = 16;
+    static const int L = 20, W = 480;  // left margin and content width
+
+    int Px(int v) const { return MulDiv(v, (int)g_setDpi, 96); }
+    HWND Add(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int top, int w, int h, int id, HFONT font = g_fontText) {
+        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, Px(x), Px(top), Px(w), Px(h), wnd,
+                                 (HMENU)(INT_PTR)id, g_inst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)font, FALSE);
+        return c;
+    }
+    int Measure(const wchar_t* text, int w, HFONT font) const {
+        HDC dc = GetDC(wnd);
+        HGDIOBJ old = SelectObject(dc, font);
+        RECT r = {0, 0, Px(w), 0};
+        DrawTextW(dc, text, -1, &r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        SelectObject(dc, old);
+        ReleaseDC(wnd, dc);
+        return MulDiv(r.bottom, 96, (int)g_setDpi) + 1;
+    }
+    // Wrapped text at (x, y); returns its height.
+    int Text(const wchar_t* text, int x, int top, int w, HFONT font, int id = 0) {
+        int h = Measure(text, w, font);
+        Add(L"STATIC", text, SS_NOPREFIX, x, top, w, h, id, font);
+        return h;
+    }
+    void Header(const wchar_t* text) { y += Text(text, L, y, W, g_fontHead) + 4; }
+    void Caption(const wchar_t* text, int x = L, int w = W) { y += Text(text, x, y, w, g_fontText, CTL_CAPTION); }
+    void Separator() {
+        y += 10;
+        Add(L"STATIC", L"", SS_ETCHEDHORZ, L, y, W, 2, 0);
+        y += 12;
+    }
+    HWND Check(const wchar_t* title, bool on, int id, int w = W, bool enabled = true) {
+        HWND c = Add(L"BUTTON", title, BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP, L, y, w, 22, id);
+        SendMessageW(c, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(c, enabled);
+        y += 22;
+        return c;
+    }
+    // A switch with its explanation under it.
+    void Option(const wchar_t* title, const wchar_t* detail, bool on, int id, bool enabled = true) {
+        Check(title, on, id, W, enabled);
+        Caption(detail, L + 20, W - 20);
+        y += 10;
+    }
+    // A title and explanation on the left, a button on the right.
+    HWND Action(const wchar_t* title, const wchar_t* detail, const wchar_t* button, int id) {
+        const int bw = 140, tw = W - bw - 16;
+        int top = y;
+        y += Text(title, L, y, tw, g_fontText);
+        Caption(detail, L, tw);
+        HWND b = Add(L"BUTTON", button, WS_TABSTOP, L + W - bw, top, bw, 28, id);
+        y = std::max(y, top + 28) + 10;
+        return b;
+    }
+};
+
+static void BuildBadgeTab(Page& p) {
+    const int th = UiThai();
+    p.Add(L"STATIC", L"", SS_OWNERDRAW, Page::L, p.y, 180, 128, CTL_PREVIEW);
+    struct { const wchar_t* label; int id; const wchar_t* const* names; int count; DWORD value; } pops[] = {
+        {TR(L"Show:", L"แสดง:"), CTL_MODE, kModeNames[th], MODE_COUNT, g_set.mode},
+        {TR(L"Style:", L"รูปแบบ:"), CTL_STYLE, kStyleNames[th], STYLE_COUNT, g_set.style},
+        {TR(L"Size:", L"ขนาด:"), CTL_SIZE, kSizeNames[th], SIZE_COUNT, g_set.size},
+    };
+    int top = p.y + 4;
+    for (auto& pop : pops) {
+        p.Add(L"STATIC", pop.label, SS_RIGHT | SS_CENTERIMAGE, 216, top, 84, 24, 0);
+        HWND c = p.Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 308, top, 192, 200, pop.id);
+        for (int i = 0; i < pop.count; i++) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)pop.names[i]);
+        SendMessageW(c, CB_SETCURSEL, pop.value, 0);
+        top += 32;
+    }
+    p.Add(L"STATIC", TR(L"Border:", L"เส้นขอบ:"), SS_RIGHT | SS_CENTERIMAGE, 216, top, 84, 24, 0);
+    HWND border = p.Add(L"BUTTON", TR(L"On", L"เปิด"), BS_AUTOCHECKBOX | WS_TABSTOP, 308, top, 192, 24, CTL_BORDER);
+    SendMessageW(border, BM_SETCHECK, g_set.badgeBorder ? BST_CHECKED : BST_UNCHECKED, 0);
+    p.y += 128 + 22;
+
+    p.Header(TR(L"Languages", L"ภาษา"));
+    p.Caption(TR(L"The keyboards added in Windows Settings → Time & language → Language & region.",
+                 L"แป้นพิมพ์ที่เพิ่มไว้ใน Settings ของ Windows → Time & language → Language & region"));
+    p.y += 10;
+    p.Text(TR(L"Keyboard", L"แป้นพิมพ์"), Page::L, p.y, 240, g_fontBold);
+    p.Text(TR(L"Colour", L"สี"), 270, p.y, 120, g_fontBold);
+    p.Text(TR(L"Show badge", L"แสดงป้าย"), 410, p.y, 90, g_fontBold);
+    p.y += 24;
+    for (size_t i = 0; i < g_langRows.size(); i++) {
+        const LangRow& row = g_langRows[i];
+        p.Add(L"STATIC", row.code, SS_CENTERIMAGE | SS_NOPREFIX, Page::L, p.y, 40, 26, 0, g_fontBold);
+        p.Add(L"STATIC", row.names, SS_CENTERIMAGE | SS_NOPREFIX | SS_ENDELLIPSIS, 64, p.y, 196, 26, 0);
+        p.Add(L"BUTTON", L"", BS_OWNERDRAW | WS_TABSTOP, 270, p.y, 48, 26, CTL_COLOR_BASE + (int)i);
+        HWND reset = p.Add(L"BUTTON", TR(L"Default", L"สีเดิม"), WS_TABSTOP, 326, p.y, 72, 26, CTL_DEFAULT_BASE + (int)i);
+        EnableWindow(reset, FindColor(row.code) != nullptr);
+        HWND show = p.Add(L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, 430, p.y, 22, 26, CTL_SHOW_BASE + (int)i);
+        SendMessageW(show, BM_SETCHECK, IsHidden(row.code) ? BST_UNCHECKED : BST_CHECKED, 0);
+        p.y += 32;
+    }
+}
+
+static void BuildFixTab(Page& p) {
+    const int th = UiThai();
+    const int mode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
+    p.Header(TR(L"Fix Wrong Language (EN ⇄ TH)", L"แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"));
+    const wchar_t* details[3] = {
+        TR(L"Nothing is fixed, and CursorLingo doesn't look at your typing at all.", L"ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย"),
+        TR(L"Tap Shift twice to switch the last word (or the selected text) to the other language.",
+           L"พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้"),
+        TR(L"Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
+           L"แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน"),
+    };
+    for (int i = 0; i < 3; i++) {
+        HWND r = p.Add(L"BUTTON", kFixNames[th][i], BS_AUTORADIOBUTTON | WS_TABSTOP | (i == 0 ? WS_GROUP : 0), Page::L, p.y, Page::W,
+                       22, CTL_FIX_BASE + i);
+        SendMessageW(r, BM_SETCHECK, mode == i ? BST_CHECKED : BST_UNCHECKED, 0);
+        p.y += 22;
+        p.Caption(details[i], Page::L + 20, Page::W - 20);
+        p.y += 8;
+    }
+    p.Separator();
+    wchar_t detail[512];
+    swprintf(detail, 512,
+             TR(L"Names in code often look like wrong-language words, so these apps aren't fixed automatically: %ls. Terminals "
+                L"(%ls) never are, whatever this is set to. Both lists come with CursorLingo; ask for more on GitHub.",
+                L"ชื่อตัวแปรในโค้ดหน้าตาคล้ายคำพิมพ์ผิดภาษาบ่อยๆ เลยไม่แก้เองในแอปพวกนี้: %ls ส่วน Terminal (%ls) ไม่แก้เองเลย "
+                L"ไม่ว่าจะตั้งตรงนี้ไว้ยังไง รายชื่อแอปมีมากับ CursorLingo อยากให้เพิ่มแอปไหน บอกได้ที่ GitHub"),
+             kCodeEditorNames, kTerminalNames);
+    p.Option(TR(L"Code editors: fix only on double Shift", L"โปรแกรมเขียนโค้ด: แก้เฉพาะตอนกด Shift 2 ครั้ง"), detail,
+             g_set.codeEditorsManual != 0, CTL_EDITORS, mode == 2);
+    wchar_t learned[64];
+    if (!g_ruleCount) wcscpy(learned, TR(L"Learned words: none yet", L"คำที่จำไว้: ยังไม่มี"));
+    else swprintf(learned, 64, TR(L"Learned words: %d", L"คำที่จำไว้: %d คำ"), g_ruleCount);
+    HWND forget = p.Action(learned,
+                           TR(L"When you convert or undo a word with double Shift, CursorLingo remembers it and does the same next "
+                              L"time. Kept on this PC only.",
+                              L"คำไหนที่คุณกด Shift 2 ครั้งเพื่อแปลงหรือย้อนคืน จะถูกจำไว้ แล้วครั้งหน้าทำแบบเดียวกันให้เอง "
+                              L"เก็บไว้ในเครื่องนี้เท่านั้น"),
+                           TR(L"Forget", L"ล้าง"), CTL_FORGET);
+    EnableWindow(forget, g_ruleCount > 0);
+    p.Separator();
+    p.Option(TR(L"Remember language per app", L"จำภาษาของแต่ละแอป"),
+             TR(L"Going back to an app switches to the keyboard you last used there. Works even with fixing off.",
+                L"กลับไปแอปไหน ก็สลับเป็นภาษาที่ใช้ล่าสุดในแอปนั้นให้เอง ใช้ได้แม้จะปิดการแก้คำไว้"),
+             g_set.perAppLanguage != 0, CTL_PER_APP);
+}
+
+static void BuildPresentTab(Page& p) {
+    const int th = UiThai();
+    p.Header(TR(L"Tools", L"เครื่องมือ"));
+    p.Caption(TR(L"To change a shortcut, click its box and press the new keys, with Ctrl or Alt. Backspace clears it.",
+                 L"อยากเปลี่ยนคีย์ลัด คลิกที่ช่องแล้วกดคีย์ใหม่ (ต้องมี Ctrl หรือ Alt ด้วย) ถ้าไม่อยากใช้คีย์ลัด กด Backspace"));
+    p.y += 12;
+    const bool on[3] = {g_set.presentation != 0, g_zoom, g_drawing};
+    const wchar_t* details[3] = {
+        TR(L"Dims the screen except for a circle around the pointer. You can still click and type as usual.",
+           L"หรี่จอ เหลือวงกลมใสรอบเมาส์ ยังคลิกและพิมพ์ได้ตามปกติ"),
+        TR(L"Magnifies what is under the pointer, inside the circle.", L"ขยายจุดที่เมาส์ชี้ให้ใหญ่ขึ้นในวงกลม"),
+        TR(L"Draw over the screen with the mouse. While it's on, clicks draw instead of reaching apps; Esc stops.",
+           L"ลากเมาส์ขีดเขียนบนจอได้เลย ระหว่างนี้คลิกจะเป็นการวาด ไม่โดนแอปข้างใต้ กด Esc เพื่อเลิกวาด"),
+    };
+    for (int i = 0; i < 3; i++) {
+        int top = p.y;
+        p.Check(kToolNames[th][i], on[i], CTL_TOOL_BASE + i, 300);
+        p.Caption(details[i], Page::L + 20, 300);
+        HWND key = p.Add(HOTKEY_CLASSW, L"", WS_TABSTOP | WS_BORDER, 350, top, 150, 26, CTL_KEY_BASE + i);
+        // Keys without Ctrl or Alt would take plain typing: the control turns them into Ctrl+Alt+key.
+        SendMessageW(key, HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
+        SendMessageW(key, HKM_SETHOTKEY, *ToolKey(i), 0);
+        p.y = std::max(p.y, top + 26) + 12;
+    }
+    p.Add(L"STATIC", g_keyStatus, SS_NOPREFIX | SS_CENTERIMAGE, Page::L, p.y, 320, 28, CTL_STATUS);
+    p.Add(L"BUTTON", TR(L"Restore defaults", L"คืนค่าคีย์ลัดเริ่มต้น"), WS_TABSTOP, 350, p.y, 150, 28, CTL_RESTORE);
+    p.y += 28;
+    p.Separator();
+
+    p.Header(TR(L"Circle", L"วงกลม"));
+    p.y += 4;
+    struct { const wchar_t* label; int id, valueId, lo, hi; DWORD value; } sliders[] = {
+        {TR(L"Size", L"ขนาดวง"), CTL_RADIUS, CTL_RADIUS_VALUE, 40, 300, g_set.spotRadius},
+        {TR(L"Magnification", L"ระดับซูม"), CTL_ZOOM_LEVEL, CTL_ZOOM_VALUE, 15, 80, g_set.zoomLevel},
+    };
+    for (auto& s : sliders) {
+        p.Add(L"STATIC", s.label, SS_CENTERIMAGE, Page::L, p.y, 110, 28, 0);
+        HWND bar = p.Add(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 130, p.y, 270, 28, s.id);
+        SendMessageW(bar, TBM_SETRANGE, FALSE, MAKELPARAM(s.lo, s.hi));
+        SendMessageW(bar, TBM_SETPAGESIZE, 0, 10);
+        SendMessageW(bar, TBM_SETPOS, TRUE, std::min(std::max((int)s.value, s.lo), s.hi));
+        p.Add(L"STATIC", L"", SS_CENTERIMAGE, 410, p.y, 90, 28, s.valueId);
+        p.y += 34;
+    }
+    p.Separator();
+
+    p.Header(TR(L"While a Tool Is On", L"ระหว่างใช้งาน"));
+    p.y += 4;
+    const wchar_t* legend[][2] = {
+        {TR(L"Ctrl+Alt + wheel", L"Ctrl+Alt + ล้อเมาส์"), TR(L"Resize the circle", L"ปรับขนาดวง")},
+        {L"Ctrl+Alt+=   Ctrl+Alt+−", TR(L"Zoom in / out", L"ซูมเข้า / ออก")},
+        {L"Ctrl+Z", TR(L"Take back the last stroke", L"ลบเส้นที่วาดล่าสุด")},
+        {L"Esc", TR(L"Stop drawing; press again to turn everything off", L"เลิกวาด กดอีกครั้งเพื่อปิดทั้งหมด")},
+        {TR(L"Click", L"คลิก"), TR(L"A ring in the colour of the language in use", L"มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")},
+    };
+    for (auto& l : legend) {
+        int h = std::max(p.Text(l[0], Page::L, p.y, 180, g_fontBold), p.Text(l[1], 210, p.y, 290, g_fontText));
+        p.y += h + 6;
+    }
+}
+
+static void BuildGeneralTab(Page& p) {
+    const int th = UiThai();
+    HWND icon = p.Add(L"STATIC", L"", SS_ICON | SS_REALSIZEIMAGE, Page::L, p.y, 48, 48, 0);
+    SendMessageW(icon, STM_SETICON, (WPARAM)LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, p.Px(48), p.Px(48), LR_SHARED), 0);
+    wchar_t version[16], about[160];
+    AppVersion(version, 16);
+    swprintf(about, 160, TR(L"Version %ls · Free and open source · No network access, no tracking",
+                            L"เวอร์ชัน %ls · ฟรีและโอเพนซอร์ส · ไม่ต่อเน็ต ไม่เก็บข้อมูลการใช้งาน"),
+             version);
+    int top = p.y + 4;
+    top += p.Text(kAppName, 84, top, 416, g_fontHead) + 2;
+    p.Text(about, 84, top, 416, g_fontText, CTL_CAPTION);
+    p.y += 48;
+    p.Separator();
+
+    if (IsPackaged()) {  // switched in Windows Settings; the app cannot tell whether it is on
+        p.Action(TR(L"Open CursorLingo automatically", L"เปิด CursorLingo อัตโนมัติ"),
+                 TR(L"Installed from the Microsoft Store, so Windows looks after this: switch CursorLingo on under Settings "
+                    L"→ Apps → Startup.",
+                    L"ติดตั้งจาก Microsoft Store เรื่องนี้ Windows เป็นคนดูแล เปิดได้ที่ Settings → Apps → Startup"),
+                 TR(L"Startup apps…", L"เปิด Startup apps…"), CTL_STARTUP);
+    } else {
+        p.Option(TR(L"Open CursorLingo automatically", L"เปิด CursorLingo อัตโนมัติ"),
+                 TR(L"Starts by itself when you sign in to Windows, so the badge is always there.",
+                    L"เปิดเครื่องหรือล็อกอินเมื่อไหร่ CursorLingo ก็ทำงานเลย ไม่ต้องคอยเปิดเอง"),
+                 StartupEnabled(), CTL_STARTUP);
+    }
+    int langTop = p.y;
+    p.y += p.Text(L"Language / ภาษา", Page::L, p.y, 300, g_fontText);
+    p.Caption(TR(L"The language of the menu and this window.", L"ภาษาที่ใช้ในเมนูและหน้าต่างนี้"), Page::L, 300);
+    HWND lang = p.Add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL, 340, langTop, 160, 200, CTL_UI_LANG);
+    for (int i = 0; i < 3; i++) SendMessageW(lang, CB_ADDSTRING, 0, (LPARAM)kUiLangNames[th][i]);
+    SendMessageW(lang, CB_SETCURSEL, g_set.uiLang, 0);
+    p.y += 10;
+    p.Action(TR(L"Found a wrong fix or a bug?", L"เจอคำที่แก้ผิด หรือเจอบั๊ก?"),
+             TR(L"Opens the report form on GitHub in your browser. Nothing you typed is attached.",
+                L"จะเปิดหน้าแจ้งปัญหาบน GitHub ในเบราว์เซอร์ ไม่มีอะไรที่คุณพิมพ์ติดไปด้วย"),
+             TR(L"Report…", L"แจ้งปัญหา…"), CTL_REPORT);
+    p.Separator();
+
+    p.Header(TR(L"Support CursorLingo", L"สนับสนุน CursorLingo"));
+    p.Caption(TR(L"CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub or a share with "
+                 L"friends means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
+                 L"CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ ฝากกดดาวบน GitHub "
+                 L"หรือแชร์ให้เพื่อนๆ หน่อยนะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"));
+    p.y += 10;
+    p.Add(L"BUTTON", TR(L"★ Star on GitHub", L"★ ให้ดาวบน GitHub"), WS_TABSTOP, Page::L, p.y, 170, 30, CTL_STAR);
+    p.Add(L"BUTTON", TR(L"How to contribute", L"วิธีร่วมพัฒนา"), WS_TABSTOP, Page::L + 180, p.y, 150, 30, CTL_CONTRIBUTE);
+    p.y += 30;
+}
+
+static void ShowSliderValues() {
+    wchar_t text[32];
+    int r = (int)SendDlgItemMessageW(g_setPage, CTL_RADIUS, TBM_GETPOS, 0, 0);
+    swprintf(text, 32, TR(L"%d pt", L"%d พอยต์"), r);
+    SetDlgItemTextW(g_setPage, CTL_RADIUS_VALUE, text);
+    int z = (int)SendDlgItemMessageW(g_setPage, CTL_ZOOM_LEVEL, TBM_GETPOS, 0, 0);
+    swprintf(text, 32, L"%d.%d×", z / 10, z % 10);
+    SetDlgItemTextW(g_setPage, CTL_ZOOM_VALUE, text);
+}
+
+static void ApplyKey(int i, HWND box);
+
+// Keeps what the shortcut boxes on the page say, before the page goes away.
+static void ApplyKeyBoxes() {
+    for (int i = 0; i < 3 && g_setPage; i++) {
+        HWND box = GetDlgItem(g_setPage, CTL_KEY_BASE + i);
+        if (box && (WORD)SendMessageW(box, HKM_GETHOTKEY, 0, 0) != *ToolKey(i)) ApplyKey(i, box);
+    }
+}
+
+// Builds the open tab's page and fits the window around it.
+static void BuildPage() {
+    ApplyKeyBoxes();
+    int focusId = 0;
+    HWND focus = GetFocus();
+    if (g_setPage && focus && GetParent(focus) == g_setPage) focusId = GetDlgCtrlID(focus);
+    SendMessageW(g_setWnd, WM_SETREDRAW, FALSE, 0);
+    if (g_setPage) DestroyWindow(g_setPage);
+    g_setPage = CreateWindowExW(WS_EX_CONTROLPARENT, L"CursorLingoPage", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 1, 1,
+                                g_setWnd, nullptr, g_inst, nullptr);
+    Page p{g_setPage};
+    switch (g_setTab) {
+        case TAB_BADGE: BuildBadgeTab(p); break;
+        case TAB_FIX: BuildFixTab(p); break;
+        case TAB_PRESENT: BuildPresentTab(p); ShowSliderValues(); break;
+        default: BuildGeneralTab(p); break;
+    }
+    // The tab control goes round the page; the window round the tab control.
+    RECT page = {0, 0, p.Px(520), p.Px(p.y + 20)}, tabs = page;
+    TabCtrl_AdjustRect(g_setTabs, TRUE, &tabs);
+    const int dx = p.Px(10) - tabs.left, dy = p.Px(10) - tabs.top;
+    OffsetRect(&page, dx, dy);
+    OffsetRect(&tabs, dx, dy);
+    MoveWindow(g_setTabs, tabs.left, tabs.top, tabs.right - tabs.left, tabs.bottom - tabs.top, FALSE);
+    MoveWindow(g_setPage, page.left, page.top, page.right - page.left, page.bottom - page.top, FALSE);
+    const DWORD style = GetWindowLongW(g_setWnd, GWL_STYLE), ex = GetWindowLongW(g_setWnd, GWL_EXSTYLE);
+    RECT frame = {0, 0, tabs.right + p.Px(10), tabs.bottom + p.Px(10)};
+    AdjustWindowRectExForDpi(&frame, style, FALSE, ex, g_setDpi);
+    SetWindowPos(g_setWnd, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SendMessageW(g_setWnd, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(g_setWnd, nullptr, nullptr, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+    if (HWND again = focusId ? GetDlgItem(g_setPage, focusId) : nullptr) SetFocus(again);
+    else if (g_setActive && (!GetFocus() || GetFocus() == g_setWnd)) SetFocus(g_setTabs);
+}
+
+// The badge next to a pointer, on a soft background, the way it looks on screen.
+static void DrawPreview(HDC dc, RECT r) {
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    Bitmap canvas;
+    if (!canvas.Create(w, h)) return;
+    const COLORREF bg = GetSysColor(COLOR_WINDOW);
+    const Rgb back = {GetRValue(bg) / 255.0f, GetGValue(bg) / 255.0f, GetBValue(bg) / 255.0f};
+    const Rgb a = {0.36f, 0.46f, 0.68f}, b = {0.64f, 0.52f, 0.74f};
+    const float radius = 10 * DpiScaleOf(g_setDpi);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float t = (x + y) / (float)(w + h), in = Clamp01(0.5f - SdRoundRect(x + 0.5f, y + 0.5f, w / 2.0f, h / 2.0f, w / 2.0f, h / 2.0f, radius));
+            Rgb c = {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t};
+            c = {back.r + (c.r - back.r) * in, back.g + (c.g - back.g) * in, back.b + (c.b - back.b) * in};
+            canvas.px[y * w + x] = 0xFF000000 | ToRef({c.b, c.g, c.r});  // a DIB stores blue in the low byte
+        }
+    const int cx = w * 34 / 100, cy = h * 36 / 100;
+    const int cursor = MulDiv(32, (int)g_setDpi, 96);
+    DrawIconEx(canvas.dc, cx, cy, LoadCursorW(nullptr, IDC_ARROW), cursor, cursor, 0, nullptr, DI_NORMAL);
+
+    const float s = kSizeScale[g_set.size] * DpiScaleOf(g_setDpi);
+    const bool dot = g_set.style == STYLE_DOT;
+    const int bw = (int)std::lround((dot ? 12 : (wcslen(g_code) > 2 ? 30 : 24)) * s), bh = (int)std::lround((dot ? 12 : 17) * s);
+    const int pad = (int)std::ceil(3 * DpiScaleOf(g_setDpi));
+    Bitmap badge;
+    if (badge.Create(bw + 2 * pad, bh + 2 * pad)) {
+        RenderBadge(badge, g_code, g_set.style, bw, bh, 11.5f * s, true);
+        BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        AlphaBlend(canvas.dc, cx + (int)(14 * s) - pad, cy + (int)(20 * s) - pad, badge.w, badge.h, badge.dc, 0, 0, badge.w, badge.h, bf);
+    }
+    BitBlt(dc, r.left, r.top, w, h, canvas.dc, 0, 0, SRCCOPY);
+}
+
+static void DrawSwatch(const DRAWITEMSTRUCT* d, const wchar_t* code) {
+    HDC dc = d->hDC;
+    RECT r = d->rcItem;
+    FillRect(dc, &r, GetSysColorBrush(COLOR_WINDOW));
+    const int round = MulDiv(8, (int)g_setDpi, 96);
+    HBRUSH fill = CreateSolidBrush(ToRef(AccentFor(code)));
+    HPEN pen = CreatePen(PS_SOLID, 1, GetSysColor(d->itemState & ODS_FOCUS ? COLOR_HIGHLIGHT : COLOR_BTNSHADOW));
+    HGDIOBJ oldBrush = SelectObject(dc, fill), oldPen = SelectObject(dc, pen);
+    InflateRect(&r, -1, -1);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, round, round);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(fill);
+    DeleteObject(pen);
+}
+
+static void PickColor(const wchar_t* code) {
+    static COLORREF custom[16];
+    CHOOSECOLORW cc = {sizeof(cc)};
+    cc.hwndOwner = g_setWnd;
+    cc.rgbResult = ToRef(AccentFor(code));
+    cc.lpCustColors = custom;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) return;
+    SetColor(code, cc.rgbResult);
+    Refresh(true);
+    SettingsReload(TAB_BADGE);
+}
+
+// A shortcut box changed: keep the new keys unless a tool needs them, another tool has them, or another app does.
+static void ApplyKey(int i, HWND box) {
+    const DWORD k = (WORD)SendMessageW(box, HKM_GETHOTKEY, 0, 0);
+    if (k && !LOBYTE(k)) return;  // only modifiers so far
+    wchar_t text[32];
+    KeyText(k, text, 32);
+    g_keyStatus[0] = 0;
+    const DWORD reserved[] = {MAKEWORD(VK_OEM_PLUS, HOTKEYF_CONTROL | HOTKEYF_ALT), MAKEWORD(VK_OEM_MINUS, HOTKEYF_CONTROL | HOTKEYF_ALT),
+                              MAKEWORD('Z', HOTKEYF_CONTROL)};
+    for (DWORD r : reserved)
+        if (k == r) swprintf(g_keyStatus, 128, TR(L"%ls is taken while a tool is on. Pick another.", L"%ls ใช้ตอนเปิดเครื่องมืออยู่แล้ว เลือกคีย์อื่นนะ"), text);
+    for (int j = 0; j < 3 && !g_keyStatus[0]; j++)
+        if (j != i && k && *ToolKey(j) == k)
+            swprintf(g_keyStatus, 128, TR(L"%ls is already used for %ls.", L"%ls ใช้กับ%lsอยู่แล้ว"), text, kToolNames[UiThai()][j]);
+    if (!g_keyStatus[0]) {
+        const DWORD old = *ToolKey(i);
+        *ToolKey(i) = k;
+        const int failed = RegisterToolKeys();
+        if (g_keysPaused) UnregisterToolKeys();
+        if (failed & (1 << i)) {
+            *ToolKey(i) = old;
+            if (!g_keysPaused) RegisterToolKeys();
+            swprintf(g_keyStatus, 128, TR(L"Another app already uses %ls.", L"มีแอปอื่นใช้ %ls อยู่แล้ว"), text);
+        } else {
+            SaveSettings();
+        }
+    }
+    SetDlgItemTextW(g_setPage, CTL_STATUS, g_keyStatus);
+}
+
+static void SetSettingsTexts() {
+    const int th = UiThai();
+    SetWindowTextW(g_setWnd, TR(L"CursorLingo Settings", L"ตั้งค่า CursorLingo"));
+    for (int i = 0; i < TAB_COUNT; i++) {
+        TCITEMW item = {TCIF_TEXT};
+        item.pszText = (LPWSTR)kTabNames[th][i];
+        if (TabCtrl_GetItemCount(g_setTabs) > i) TabCtrl_SetItem(g_setTabs, i, &item);
+        else TabCtrl_InsertItem(g_setTabs, i, &item);
+    }
+}
+
+static void PageCommand(int id, int code, HWND ctl) {
+    const bool checked = SendMessageW(ctl, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    if (id == CTL_MODE || id == CTL_STYLE || id == CTL_SIZE) {
+        if (code != CBN_SELCHANGE) return;
+        DWORD v = (DWORD)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
+        (id == CTL_MODE ? g_set.mode : id == CTL_STYLE ? g_set.style : g_set.size) = v;
+        SaveSettings();
+        Refresh(true);
+        InvalidateRect(GetDlgItem(g_setPage, CTL_PREVIEW), nullptr, FALSE);
+    } else if (id == CTL_BORDER) {
+        g_set.badgeBorder = checked;
+        SaveSettings();
+        Refresh(true);
+        InvalidateRect(GetDlgItem(g_setPage, CTL_PREVIEW), nullptr, FALSE);
+    } else if (id >= CTL_COLOR_BASE && id < CTL_COLOR_BASE + (int)g_langRows.size()) {
+        PickColor(g_langRows[id - CTL_COLOR_BASE].code);
+    } else if (id >= CTL_DEFAULT_BASE && id < CTL_DEFAULT_BASE + (int)g_langRows.size()) {
+        SetColor(g_langRows[id - CTL_DEFAULT_BASE].code, CLR_NONE);
+        Refresh(true);
+        SettingsReload(TAB_BADGE);
+    } else if (id >= CTL_SHOW_BASE && id < CTL_SHOW_BASE + (int)g_langRows.size()) {
+        if (IsHidden(g_langRows[id - CTL_SHOW_BASE].code) == checked) ToggleHidden(g_langRows[id - CTL_SHOW_BASE].code);
+        SaveSettings();
+        Refresh(false);
+    } else if (id >= CTL_FIX_BASE && id < CTL_FIX_BASE + 3) {
+        if (!checked) return;
+        SetFixMode(id - CTL_FIX_BASE);
+        SettingsReload(TAB_FIX);  // code editors only apply to Automatic
+    } else if (id == CTL_EDITORS) {
+        g_set.codeEditorsManual = checked;
+        SaveSettings();
+    } else if (id == CTL_FORGET) {
+        g_ruleCount = 0;
+        SaveRules();
+        SettingsReload(TAB_FIX);
+    } else if (id == CTL_PER_APP) {
+        g_set.perAppLanguage = checked;
+        SaveSettings();  // the first app is remembered when it comes back to the front
+    } else if (id >= CTL_TOOL_BASE && id < CTL_TOOL_BASE + 3) {
+        if (id == CTL_TOOL_BASE) {
+            SetPresentation(checked);
+            SaveSettings();
+        } else if (id == CTL_TOOL_BASE + 1) {
+            SetZoom(checked);
+        } else {
+            SetDrawing(checked);
+        }
+        SettingsReload(TAB_PRESENT);  // Zoom may not be there
+    } else if (id >= CTL_KEY_BASE && id < CTL_KEY_BASE + 3) {
+        if (code == EN_CHANGE) ApplyKey(id - CTL_KEY_BASE, ctl);
+    } else if (id == CTL_RESTORE) {
+        for (int i = 0; i < 3; i++) *ToolKey(i) = kToolDefaults[i];
+        const int failed = RegisterToolKeys();
+        if (g_keysPaused) UnregisterToolKeys();
+        g_keyStatus[0] = 0;
+        for (int i = 0; i < 3; i++)
+            if (failed & (1 << i)) {
+                wchar_t text[32];
+                KeyText(*ToolKey(i), text, 32);
+                swprintf(g_keyStatus, 128, TR(L"Another app already uses %ls.", L"มีแอปอื่นใช้ %ls อยู่แล้ว"), text);
+            }
+        SaveSettings();
+        SettingsReload(TAB_PRESENT);
+    } else if (id == CTL_STARTUP) {
+        if (IsPackaged()) OpenUrl(L"ms-settings:startupapps");
+        else SetStartup(checked);
+    } else if (id == CTL_UI_LANG) {
+        if (code != CBN_SELCHANGE) return;
+        g_set.uiLang = (DWORD)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
+        SaveSettings();
+        SetSettingsTexts();
+        SettingsReload(-1);
+    } else if (id == CTL_REPORT) {  // only opens the issue form; nothing typed is ever attached
+        OpenUrl(L"https://github.com/kittipongint/cursor-lingo/issues/new/choose");
+    } else if (id == CTL_STAR) {
+        OpenUrl(L"https://github.com/kittipongint/cursor-lingo");
+    } else if (id == CTL_CONTRIBUTE) {
+        OpenUrl(L"https://github.com/kittipongint/cursor-lingo/blob/main/CONTRIBUTING.md");
+    }
+}
+
+static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-        case WM_COMMAND:
-            if (LOWORD(wp) == IDOK && ApplyKeys()) DestroyWindow(h);
-            if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);
-            if (LOWORD(wp) == IDC_RESTORE)
-                for (int i = 0; i < 3; i++) SendMessageW(g_keyCtl[i], HKM_SETHOTKEY, kToolDefaults[i], 0);
-            return 0;
         case WM_CTLCOLORSTATIC:
-            SetBkMode((HDC)wp, TRANSPARENT);
+        case WM_CTLCOLORBTN: {
+            HDC dc = (HDC)wp;
+            const int id = GetDlgCtrlID((HWND)lp);
+            SetBkMode(dc, TRANSPARENT);
+            if (id == CTL_CAPTION) SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+            if (id == CTL_STATUS) SetTextColor(dc, RGB(0xC4, 0x2B, 0x1C));
             return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
-        case WM_CLOSE:
-            DestroyWindow(h);
+        }
+        case WM_DRAWITEM: {
+            const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
+            if (d->CtlID == CTL_PREVIEW) DrawPreview(d->hDC, d->rcItem);
+            else if (d->CtlID >= CTL_COLOR_BASE && d->CtlID < CTL_COLOR_BASE + g_langRows.size())
+                DrawSwatch(d, g_langRows[d->CtlID - CTL_COLOR_BASE].code);
+            return TRUE;
+        }
+        case WM_HSCROLL: {
+            const int id = GetDlgCtrlID((HWND)lp), v = (int)SendMessageW((HWND)lp, TBM_GETPOS, 0, 0);
+            if (id == CTL_RADIUS) {
+                g_set.spotRadius = (DWORD)v;
+                RebuildHalo();
+                PaintHalo();
+                MoveHalo();
+            } else if (id == CTL_ZOOM_LEVEL) {
+                g_set.zoomLevel = (DWORD)v;
+                ApplyZoomLevel();
+                MoveLens();
+            }
+            ShowSliderValues();
+            SetTimer(g_host, TIMER_SAVE, 1000, nullptr);  // save once the slider stops
             return 0;
-        case WM_DESTROY:
-            g_keysWnd = nullptr;
-            DeleteObject(g_keysFont);
-            g_keysFont = nullptr;
-            RegisterToolKeys();
+        }
+        case WM_COMMAND:
+            PageCommand(LOWORD(wp), HIWORD(wp), (HWND)lp);
             return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-static void ShowShortcuts() {
-    if (g_keysWnd) { SetForegroundWindow(g_keysWnd); return; }
-    const int th = UiThai();
-    UINT dpi = g_dpi;
-    auto px = [dpi](int v) { return MulDiv(v, (int)dpi, 96); };
-    NONCLIENTMETRICSW ncm = {sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
-    g_keysFont = CreateFontIndirectW(&ncm.lfMessageFont);
+static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_NOTIFY:
+            if (((NMHDR*)lp)->code == TCN_SELCHANGE) {
+                g_setTab = TabCtrl_GetCurSel(g_setTabs);
+                g_keyStatus[0] = 0;
+                if (g_setTab == TAB_BADGE) ReadLanguages();
+                BuildPage();
+                UpdateKeyPause();
+            }
+            return 0;
+        case WM_ACTIVATE: {
+            g_setActive = LOWORD(wp) != WA_INACTIVE;
+            UpdateKeyPause();
+            LRESULT r = DefWindowProcW(h, msg, wp, lp);
+            if (g_setActive && GetFocus() == h) SetFocus(g_setTabs);
+            return r;
+        }
+        case WM_APP_RELOAD:
+            g_reloadPosted = false;
+            if (g_setTab == TAB_BADGE) ReadLanguages();
+            BuildPage();
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(wp) == IDCANCEL) DestroyWindow(h);  // Esc
+            return 0;
+        case WM_DPICHANGED: {
+            g_setDpi = HIWORD(wp);
+            MakeFonts();
+            SendMessageW(g_setTabs, WM_SETFONT, (WPARAM)g_fontText, FALSE);
+            const RECT* r = (const RECT*)lp;
+            SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            BuildPage();
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow(h);
+            return 0;
+        case WM_DESTROY:
+            ApplyKeyBoxes();
+            g_setWnd = g_setTabs = g_setPage = nullptr;
+            g_setActive = g_reloadPosted = false;
+            UpdateKeyPause();
+            DeleteFonts();
+            return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
 
-    RECT r = {0, 0, px(380), px(236)};
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, ex = WS_EX_CONTROLPARENT | WS_EX_DLGMODALFRAME;
-    AdjustWindowRectExForDpi(&r, style, FALSE, ex, dpi);
+// Opens the settings on `tab` (-1: the last one), or brings them to the front.
+static void ShowSettings(int tab) {
+    if (tab >= 0) g_setTab = tab;
+    if (g_setWnd) {
+        TabCtrl_SetCurSel(g_setTabs, g_setTab);
+        g_keyStatus[0] = 0;
+        SettingsReload(-1);
+        UpdateKeyPause();
+        if (IsIconic(g_setWnd)) ShowWindow(g_setWnd, SW_RESTORE);
+        SetForegroundWindow(g_setWnd);
+        return;
+    }
     POINT pt;
     GetCursorPos(&pt);
-    int w = r.right - r.left, h = r.bottom - r.top;
-    g_keysWnd = CreateWindowExW(ex, L"CursorLingoKeys", TR(L"CursorLingo shortcuts", L"คีย์ลัด CursorLingo"), style,
-                                std::max((int)g_workRect.left, std::min((int)pt.x - w / 2, (int)g_workRect.right - w)),
-                                std::max((int)g_workRect.top, std::min((int)pt.y - h / 2, (int)g_workRect.bottom - h)), w, h,
-                                nullptr, nullptr, g_inst, nullptr);
-    auto add = [&](const wchar_t* cls, const wchar_t* text, DWORD st, int x, int y, int cw, int ch, int id) {
-        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | st, px(x), px(y), px(cw), px(ch), g_keysWnd,
-                                 (HMENU)(INT_PTR)id, g_inst, nullptr);
-        SendMessageW(c, WM_SETFONT, (WPARAM)g_keysFont, FALSE);
-        return c;
-    };
-    for (int i = 0; i < 3; i++) {
-        add(L"STATIC", kToolNames[th][i], SS_CENTERIMAGE, 16, 16 + i * 36, 130, 26, 0);
-        g_keyCtl[i] = add(HOTKEY_CLASSW, L"", WS_TABSTOP | WS_BORDER, 150, 16 + i * 36, 214, 26, IDC_KEY_BASE + i);
-        // Keys without Ctrl or Alt would take plain typing: the control turns them into Ctrl+Alt+key.
-        SendMessageW(g_keyCtl[i], HKM_SETRULES, HKCOMB_NONE | HKCOMB_S, MAKELPARAM(HOTKEYF_CONTROL | HOTKEYF_ALT, 0));
-        SendMessageW(g_keyCtl[i], HKM_SETHOTKEY, *ToolKey(i), 0);
-    }
-    add(L"STATIC",
-        TR(L"Click a box and press the new keys, with Ctrl or Alt. Backspace clears a box. Esc, Ctrl+Z and Ctrl+Alt+= / − "
-           L"stay as they are.",
-           L"คลิกที่ช่องแล้วกดคีย์ใหม่ ต้องมี Ctrl หรือ Alt ด้วย กด Backspace เพื่อล้างช่อง ส่วน Esc, Ctrl+Z และ Ctrl+Alt+= / − ใช้ตามเดิม"),
-        0, 16, 126, 348, 52, 0);
-    add(L"BUTTON", TR(L"Restore defaults", L"คืนค่าเริ่มต้น"), WS_TABSTOP, 16, 192, 130, 30, IDC_RESTORE);
-    add(L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 194, 192, 82, 30, IDOK);
-    add(L"BUTTON", TR(L"Cancel", L"ยกเลิก"), WS_TABSTOP, 282, 192, 82, 30, IDCANCEL);
-
-    UnregisterToolKeys();  // so pressing the current shortcut reaches the box instead of toggling a tool
-    ShowWindow(g_keysWnd, SW_SHOW);
-    SetForegroundWindow(g_keysWnd);
-    SetFocus(g_keyCtl[0]);
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi);
+    // Always on top, like a palette: it stays visible while you try a setting out in another app.
+    g_setWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_CONTROLPARENT, L"CursorLingoSettings", L"",
+                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN, mi.rcWork.left + 40,
+                               mi.rcWork.top + 40, 100, 100, nullptr, nullptr, g_inst, nullptr);
+    g_setDpi = GetDpiForWindow(g_setWnd);
+    MakeFonts();
+    g_setTabs = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, 0, 1, 1, g_setWnd,
+                                nullptr, g_inst, nullptr);
+    SendMessageW(g_setTabs, WM_SETFONT, (WPARAM)g_fontText, FALSE);
+    SetSettingsTexts();
+    TabCtrl_SetCurSel(g_setTabs, g_setTab);
+    g_keyStatus[0] = 0;
+    ReadLanguages();
+    BuildPage();
+    RECT wr;
+    GetWindowRect(g_setWnd, &wr);
+    const int w = wr.right - wr.left, h = wr.bottom - wr.top;
+    SetWindowPos(g_setWnd, nullptr, mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2,
+                 std::max(mi.rcWork.top, mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - h) / 3), 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(g_setWnd, SW_SHOW);
+    SetForegroundWindow(g_setWnd);
 }
 
 static void ShowMenu() {
-    HMENU m = CreatePopupMenu(), style = CreatePopupMenu(), mode = CreatePopupMenu(), size = CreatePopupMenu(),
-          fix = CreatePopupMenu(), lang = CreatePopupMenu();
+    HMENU m = CreatePopupMenu(), fix = CreatePopupMenu(), present = CreatePopupMenu();
     const int th = UiThai();
     wchar_t buf[64];
     swprintf(buf, 64, TR(L"Current input: %ls", L"ภาษาที่ใช้อยู่: %ls"), g_code);
     AppendMenuW(m, MF_STRING | MF_GRAYED, 0, buf);
-    swprintf(buf, 64, TR(L"Hide badge for %ls", L"ซ่อนป้ายเมื่อเป็น %ls"), g_code);
-    AppendMenuW(m, MF_STRING | (IsHidden(g_code) ? MF_CHECKED : 0), ID_HIDE_CURRENT, buf);
-    if (g_set.hidden[0]) AppendMenuW(m, MF_STRING, ID_SHOW_ALL, TR(L"Show for all languages", L"แสดงป้ายทุกภาษา"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    for (int i = 0; i < MODE_COUNT; i++) AppendMenuW(mode, MF_STRING | (g_set.mode == (DWORD)i ? MF_CHECKED : 0), ID_MODE_BASE + i, kModeNames[th][i]);
-    for (int i = 0; i < STYLE_COUNT; i++) AppendMenuW(style, MF_STRING | (g_set.style == (DWORD)i ? MF_CHECKED : 0), ID_STYLE_BASE + i, kStyleNames[th][i]);
-    for (int i = 0; i < SIZE_COUNT; i++) AppendMenuW(size, MF_STRING | (g_set.size == (DWORD)i ? MF_CHECKED : 0), ID_SIZE_BASE + i, kSizeNames[th][i]);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)mode, TR(L"Show", L"แสดงป้าย"));
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)style, TR(L"Style", L"รูปแบบ"));
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)size, TR(L"Size", L"ขนาด"));
-    HMENU present = CreatePopupMenu();
     const bool toolOn[3] = {g_set.presentation != 0, g_zoom, g_drawing};
     for (int i = 0; i < 3; i++) {
         wchar_t key[32], title[64];
@@ -1844,36 +2569,19 @@ static void ShowMenu() {
     }
     AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt + wheel: resize the circle", L"Ctrl+Alt + ล้อเมาส์: ปรับขนาดวง"));
-    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt+= / \u2212: zoom in / out", L"Ctrl+Alt+= / \u2212: ซูมเข้า / ออก"));
+    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt+= / −: zoom in / out", L"Ctrl+Alt+= / −: ซูมเข้า / ออก"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Z: undo last stroke", L"Ctrl+Z: ลบเส้นล่าสุด"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Esc: stop drawing, then exit", L"Esc: เลิกวาด กดอีกครั้งเพื่อออก"));
     AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(present, MF_STRING, ID_SHORTCUTS, TR(L"Shortcuts\u2026", L"ตั้งคีย์ลัด\u2026"));
+    AppendMenuW(present, MF_STRING, ID_SHORTCUTS, TR(L"Shortcuts…", L"ตั้งคีย์ลัด…"));
     AppendMenuW(m, MF_POPUP | (CircleOn() || g_drawing ? MF_CHECKED : 0), (UINT_PTR)present, TR(L"Presentation", L"นำเสนอ"));
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    // One menu for the whole feature: Off, Double Shift only (fix on request) or Automatic.
     const int fixMode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
     for (int i = 0; i < 3; i++) AppendMenuW(fix, MF_STRING | (fixMode == i ? MF_CHECKED : 0), ID_FIX_BASE + i, kFixNames[th][i]);
-    AppendMenuW(fix, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(fix, MF_STRING | (g_set.codeEditorsManual ? MF_CHECKED : 0) | (fixMode == 2 ? 0 : MF_GRAYED),
-                ID_CODE_EDITORS, TR(L"In code editors: double Shift only", L"ใน code editor แก้เฉพาะตอนกด Shift 2 ครั้ง"));
-    wchar_t learned[64];
-    if (!g_ruleCount) wcscpy(learned, TR(L"Learned words: none yet", L"ยังไม่มีคำที่จำไว้"));
-    else if (th) swprintf(learned, 64, L"ล้างคำที่จำไว้ (%d คำ)", g_ruleCount);
-    else swprintf(learned, 64, L"Forget %d learned word%ls", g_ruleCount, g_ruleCount == 1 ? L"" : L"s");
-    AppendMenuW(fix, MF_STRING | (g_ruleCount ? 0 : MF_GRAYED), ID_FORGET_WORDS, learned);
     wchar_t fixTitle[96];
-    swprintf(fixTitle, 96, TR(L"Fix wrong language (EN \u21C4 TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH): %ls"), kFixNames[th][fixMode]);
+    swprintf(fixTitle, 96, TR(L"Fix wrong language (EN ⇄ TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): %ls"), kFixNames[th][fixMode]);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)fix, fixTitle);
-    AppendMenuW(m, MF_STRING | (g_set.perAppLanguage ? MF_CHECKED : 0), ID_PER_APP, TR(L"Remember language per app", L"จำภาษาของแต่ละแอป"));
-    if (IsPackaged())  // switched in Windows Settings; the app cannot tell whether it is on
-        AppendMenuW(m, MF_STRING, ID_STARTUP, TR(L"Start with Windows\u2026", L"เปิดพร้อม Windows\u2026"));
-    else
-        AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, TR(L"Start with Windows", L"เปิดพร้อม Windows"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    for (int i = 0; i < 3; i++) AppendMenuW(lang, MF_STRING | (g_set.uiLang == (DWORD)i ? MF_CHECKED : 0), ID_UILANG_BASE + i, kUiLangNames[th][i]);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)lang, L"Language / ภาษา");  // bilingual, so it can always be found
-    AppendMenuW(m, MF_STRING, ID_REPORT, TR(L"Report a wrong fix or bug\u2026", L"แจ้งปัญหาหรือคำที่แก้ผิด\u2026"));
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, TR(L"Settings…", L"ตั้งค่า…"));
     AppendMenuW(m, MF_STRING, ID_QUIT, TR(L"Quit CursorLingo", L"ปิด CursorLingo"));
 
     POINT pt;
@@ -1882,56 +2590,18 @@ static void ShowMenu() {
     UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, g_host, nullptr);
     DestroyMenu(m);  // destroys submenus too
 
-    if (!cmd) return;
-    if (cmd == ID_QUIT) { DestroyWindow(g_host); return; }
-    if (cmd == ID_STARTUP) {
-        if (IsPackaged()) ShellExecuteW(nullptr, L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL);
-        else SetStartup(!StartupEnabled());
-        return;
-    }
-    if (cmd == ID_REPORT) {  // only opens the issue form; nothing typed is ever attached
-        ShellExecuteW(nullptr, L"open", L"https://github.com/kittipongint/cursor-lingo/issues/new/choose", nullptr, nullptr, SW_SHOWNORMAL);
-        return;
-    }
-    if (cmd == ID_FORGET_WORDS) { g_ruleCount = 0; SaveRules(); return; }
-    if (cmd == ID_PRESENTATION) {
+    if (cmd == ID_QUIT) DestroyWindow(g_host);
+    else if (cmd == ID_SETTINGS) ShowSettings(-1);
+    else if (cmd == ID_SHORTCUTS) ShowSettings(TAB_PRESENT);
+    else if (cmd == ID_PRESENTATION) {
         SetPresentation(!g_set.presentation);
         SaveSettings();
-        return;
+    } else if (cmd == ID_ZOOM) SetZoom(!g_zoom);
+    else if (cmd == ID_DRAW) SetDrawing(!g_drawing);
+    else if (cmd >= ID_FIX_BASE && cmd < ID_FIX_BASE + 3) {
+        SetFixMode(cmd - ID_FIX_BASE);
+        SettingsReload(TAB_FIX);
     }
-    if (cmd == ID_ZOOM) { SetZoom(!g_zoom); return; }
-    if (cmd == ID_DRAW) { SetDrawing(!g_drawing); return; }
-    if (cmd == ID_SHORTCUTS) { ShowShortcuts(); return; }
-    if (cmd == ID_PER_APP) {
-        g_set.perAppLanguage = !g_set.perAppLanguage;
-        SaveSettings();  // the first app is remembered when it comes back to the front
-        return;
-    }
-    if (cmd >= ID_UILANG_BASE && cmd < ID_UILANG_BASE + 3) {
-        g_set.uiLang = cmd - ID_UILANG_BASE;
-        SaveSettings();
-        return;
-    }
-    if (cmd == ID_CODE_EDITORS) {
-        g_set.codeEditorsManual = !g_set.codeEditorsManual;
-        SaveSettings();
-        return;
-    }
-    if (cmd >= ID_FIX_BASE && cmd < ID_FIX_BASE + 3) {
-        int pick = cmd - ID_FIX_BASE;  // stored as AutoFix (on/off) + FixAsYouType, so older settings carry over
-        g_set.autoFix = pick != 0;
-        if (pick) g_set.fixAsYouType = pick == 2;
-        SetAutoFix(g_set.autoFix != 0);
-        SaveSettings();
-        return;
-    }
-    if (cmd == ID_HIDE_CURRENT) ToggleHidden(g_code);
-    else if (cmd == ID_SHOW_ALL) g_set.hidden[0] = 0;
-    else if (cmd >= ID_STYLE_BASE && cmd < ID_STYLE_BASE + STYLE_COUNT) g_set.style = cmd - ID_STYLE_BASE;
-    else if (cmd >= ID_MODE_BASE && cmd < ID_MODE_BASE + MODE_COUNT) g_set.mode = cmd - ID_MODE_BASE;
-    else if (cmd >= ID_SIZE_BASE && cmd < ID_SIZE_BASE + SIZE_COUNT) g_set.size = cmd - ID_SIZE_BASE;
-    SaveSettings();
-    Refresh(true);
 }
 
 static LRESULT CALLBACK BadgeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1946,7 +2616,10 @@ static LRESULT CALLBACK BadgeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == TIMER_POLL) {
                 // There is no system-wide "layout changed" event, so poll this one cheap call.
                 HKL before = g_lastHkl;
-                if (UpdateLanguage()) Refresh(true);
+                if (UpdateLanguage()) {
+                    Refresh(true);
+                    SettingsReload(TAB_BADGE);  // the preview shows the language in use
+                }
                 if (g_lastHkl != before) RememberAppLanguage(g_lastHkl);
             } else if (wp == TIMER_HIDE) {
                 KillTimer(h, TIMER_HIDE);
@@ -2048,7 +2721,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_inst = inst;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // for the Startup-folder shortcut
-    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_HOTKEY_CLASS};  // the shortcuts window
+    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_HOTKEY_CLASS | ICC_BAR_CLASSES | ICC_TAB_CLASSES};  // the Settings window
     InitCommonControlsEx(&icc);
     FindSettingsFiles();
     MigrateFromRegistry();
@@ -2070,11 +2743,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.lpszClassName = L"CursorLingoDraw";
     wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
     RegisterClassW(&wc);
-    wc.lpfnWndProc = KeysProc;  // the shortcuts window
-    wc.lpszClassName = L"CursorLingoKeys";
+    wc.lpfnWndProc = SettingsProc;  // the Settings window, and the page inside it
+    wc.lpszClassName = L"CursorLingoSettings";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
+    RegisterClassW(&wc);
+    wc.lpfnWndProc = PageProc;
+    wc.lpszClassName = L"CursorLingoPage";
+    wc.hIcon = nullptr;
     RegisterClassW(&wc);
     wc.hCursor = nullptr;
     wc.hbrBackground = nullptr;
@@ -2125,7 +2802,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (g_keysWnd && IsDialogMessageW(g_keysWnd, &msg)) continue;  // Tab, Enter and Esc in the shortcuts window
+        if (g_setWnd && IsDialogMessageW(g_setWnd, &msg)) continue;  // Tab, arrows and Esc in the Settings window
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

@@ -36,7 +36,7 @@
   - Change the three tools' shortcuts in **Presentation → Shortcuts…**.
   - Spotlight and drawing need no permissions, and neither does zoom on Windows. Zoom on macOS needs **Screen Recording**, because it has to see the screen; macOS asks the first time you turn zoom on, and recent versions ask again every so often, as they do for every app that records the screen.
 - **Remember language per app (optional).** Each app gets back the layout you last used in it, e.g. English in your editor and Thai in your chat app.
-- **Launch at login / Start with Windows**, toggled from the menu.
+- **Launch at login / Start with Windows**, switched on in Settings.
 - **English or Thai menus**, following your system language, or picked under *Language / ภาษา*.
 - **Click-through.** The badge never steals clicks or focus.
 - **Auto-fix wrong language (optional, off by default).** Typed `l;ylfu;yoouhgik` instead of `สวัสดีวันนี้เรา`, or `ะ้รห` instead of `this`? CursorLingo re-types the word and switches the layout for you. English ⇄ Thai. See [Auto-fix](#auto-fix-wrong-language).
@@ -123,7 +123,7 @@ You can also cross-compile with MinGW-w64:
 ```bash
 x86_64-w64-mingw32-windres windows/CursorLingo.rc -O coff -o res.o
 x86_64-w64-mingw32-g++ -std=c++17 -Os -municode -mwindows -static windows/CursorLingo.cpp res.o \
-  -o CursorLingo.exe -luser32 -lgdi32 -lshell32 -ladvapi32 -lshcore -lwtsapi32 -lole32 -luuid -s
+  -o CursorLingo.exe -luser32 -lgdi32 -lshell32 -ladvapi32 -lshcore -lwtsapi32 -lole32 -luuid -lcomctl32 -lcomdlg32 -lmsimg32 -s
 ```
 
 ## Auto-fix wrong language
@@ -191,18 +191,12 @@ The menu-bar icon shows the current input language, the **Presentation** tools, 
 
 ### Windows
 
-Right-click the tray icon to:
+Click the tray icon for the current input language, the **Presentation** tools, **Fix Wrong Language (EN ⇄ TH)**, **Settings…** and Quit. **Settings…** has the same four tabs as on macOS:
 
-- see the current input language,
-- hide the badge for the current language, or show it for all languages again,
-- choose **Show**, **Style** and **Size**,
-- set **Fix Wrong Language (EN ⇄ TH)** to Off, Double Shift Only or Automatic, toggle **In Code Editors: Double Shift Only**, and forget learned words,
-- toggle the **Presentation** tools: Spotlight, Zoom and Draw on Screen (their shortcuts work from anywhere, and **Shortcuts…** changes them),
-- toggle **Remember Language per App**,
-- toggle **Launch at Login** / **Start with Windows**,
-- choose the menu's **Language / ภาษา**: English, Thai, or the system's language (the default),
-- **Report a Wrong Fix or Bug…** (opens the GitHub issue form; nothing you typed is attached),
-- quit.
+- **Badge:** the live preview, **Show**, **Style**, **Size** and **Border**, and one row per keyboard added in Windows Settings → Time & language → Language & region, to pick its color or hide its badge.
+- **Fix Wrong Language:** the mode, **Code editors: fix only on double Shift**, forget learned words, and **Remember language per app**.
+- **Presentation:** turn Spotlight, Zoom and Draw on Screen on or off, change their shortcuts, and set the circle size and magnification.
+- **General:** **Open CursorLingo automatically** (the Microsoft Store version opens Windows' Startup apps page instead), the menu's **Language / ภาษา**, **Report…** (opens the GitHub issue form; nothing you typed is attached), and the version.
 
 ## Uninstall
 

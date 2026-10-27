@@ -6,7 +6,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")  # stati
 
 add_executable(CursorLingo WIN32 CursorLingo.cpp CursorLingo.rc)
 target_compile_definitions(CursorLingo PRIVATE _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
-target_link_libraries(CursorLingo PRIVATE user32 gdi32 shell32 advapi32 shcore wtsapi32 ole32 uuid comctl32)
+target_link_libraries(CursorLingo PRIVATE user32 gdi32 shell32 advapi32 shcore wtsapi32 ole32 uuid comctl32 comdlg32 msimg32)
 
 if(MSVC)
   target_compile_options(CursorLingo PRIVATE /O1 /GS- /W4 /permissive- /utf-8)  # sources are UTF-8
