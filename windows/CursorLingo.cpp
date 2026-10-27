@@ -5,10 +5,10 @@
 //   * Rendering happens only when the language, style, size or monitor DPI changes.
 //   * The badge is a per-pixel-alpha layered window, so it is anti-aliased and click-through.
 //   * The active layout is read with GetKeyboardLayout(). A keyboard hook exists only while the optional
-//     "Auto-fix wrong language" feature is switched on (off by default); it keeps nothing but the current
-//     and last word, in memory, and never touches the network or disk.
-//   * Runs as a normal user: no administrator rights, no installer, no services. The registry is only
-//     touched under HKCU.
+//     "Fix wrong language" feature is switched on (off by default); it keeps nothing but the current
+//     and last word in memory (plus the personal word list the user teaches it), and never touches the network.
+//   * Runs as a normal user: no administrator rights, no installer, no services, no registry. Settings are
+//     plain files in %APPDATA%\CursorLingo; "Start with Windows" is a shortcut in the user's Startup folder.
 
 #ifndef UNICODE
 #define UNICODE
@@ -24,6 +24,9 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
+#include <wtsapi32.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -40,13 +43,16 @@ enum Style { STYLE_COLOR, STYLE_LIGHT, STYLE_DARK, STYLE_DOT, STYLE_COUNT };
 enum Mode { MODE_ALWAYS, MODE_ON_SWITCH, MODE_COUNT };
 enum Size { SIZE_SMALL, SIZE_MEDIUM, SIZE_LARGE, SIZE_COUNT };
 
-static const wchar_t* kStyleNames[] = {L"Color", L"Light", L"Dark", L"Dot"};
-static const wchar_t* kModeNames[] = {L"Always", L"Only when switching"};
-static const wchar_t* kSizeNames[] = {L"Small", L"Medium", L"Large"};
+// Menu text in English [0] and Thai [1]. Thai literals need the compiler to read this file as UTF-8 (/utf-8).
+static_assert(sizeof(L"ไทย") / sizeof(wchar_t) == 4, "compile with /utf-8 (MSVC) so Thai text is read correctly");
+static const wchar_t* kStyleNames[2][4] = {{L"Color", L"Light", L"Dark", L"Dot"}, {L"สีสด", L"โทนสว่าง", L"โทนมืด", L"จุดเล็ก"}};
+static const wchar_t* kModeNames[2][2] = {{L"Always", L"Only when switching"}, {L"ตลอดเวลา", L"เฉพาะตอนเปลี่ยนภาษา"}};
+static const wchar_t* kSizeNames[2][3] = {{L"Small", L"Medium", L"Large"}, {L"เล็ก", L"กลาง", L"ใหญ่"}};
+static const wchar_t* kFixNames[2][3] = {{L"Off", L"Double Shift only", L"Automatic"},
+                                         {L"ปิด", L"กด Shift 2 ครั้งเพื่อแก้", L"แก้ให้อัตโนมัติ"}};
+static const wchar_t* kUiLangNames[2][3] = {{L"System", L"English", L"ไทย"}, {L"ตามภาษาของระบบ", L"English", L"ไทย"}};
 static const float kSizeScale[] = {0.85f, 1.0f, 1.3f};
 
-static const wchar_t kRegKey[] = L"Software\\CursorLingo";
-static const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static const wchar_t kAppName[] = L"CursorLingo";
 
 struct Settings {
@@ -54,38 +60,90 @@ struct Settings {
     DWORD mode = MODE_ALWAYS;
     DWORD size = SIZE_MEDIUM;
     DWORD autoFix = 0;          // re-type words typed in the wrong layout (EN <-> TH)
+    DWORD fixAsYouType = 1;     // with autoFix: fix by itself (1), or only on double Shift (0)
+    DWORD codeEditorsManual = 1;  // code editors: double Shift only
+    DWORD perAppLanguage = 0;   // switch to the layout each app was last used with
+    DWORD uiLang = 0;           // menu language: 0 = Windows display language, 1 = English, 2 = Thai
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
 
-static DWORD RegReadDword(HKEY k, const wchar_t* name, DWORD def, DWORD max) {
-    DWORD v = 0, cb = sizeof(v);
-    if (RegQueryValueExW(k, name, nullptr, nullptr, (BYTE*)&v, &cb) != ERROR_SUCCESS || v >= max) return def;
-    return v;
+// ---------------------------------------------------------------------------
+// Settings storage: plain files in the user's profile, never the registry
+// ---------------------------------------------------------------------------
+//
+// CursorLingo.ini holds the settings and the per-app layouts, CursorLingo.words the personal word list. They live in
+// %APPDATA%\CursorLingo, or next to the exe when a CursorLingo.ini is already there (portable use). Nothing here
+// needs administrator rights, and deleting the folder resets everything.
+
+static wchar_t g_ini[MAX_PATH], g_wordsFile[MAX_PATH];
+
+struct SettingField {
+    const wchar_t* name;
+    DWORD* value;
+    DWORD def, max;
+};
+static const SettingField kFields[] = {
+    {L"Style", &g_set.style, STYLE_COLOR, STYLE_COUNT},
+    {L"Mode", &g_set.mode, MODE_ALWAYS, MODE_COUNT},
+    {L"Size", &g_set.size, SIZE_MEDIUM, SIZE_COUNT},
+    {L"AutoFix", &g_set.autoFix, 0, 2},
+    {L"FixAsYouType", &g_set.fixAsYouType, 1, 2},
+    {L"CodeEditorsManual", &g_set.codeEditorsManual, 1, 2},
+    {L"PerAppLanguage", &g_set.perAppLanguage, 0, 2},
+    {L"UILanguage", &g_set.uiLang, 0, 3},
+};
+
+static void FindSettingsFiles() {
+    wchar_t dir[MAX_PATH];
+    GetModuleFileNameW(nullptr, dir, MAX_PATH);
+    if (wchar_t* slash = wcsrchr(dir, L'\\')) *slash = 0;
+    swprintf(g_ini, MAX_PATH, L"%ls\\CursorLingo.ini", dir);
+    if (GetFileAttributesW(g_ini) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t* appData = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData))) {
+            swprintf(dir, MAX_PATH, L"%ls\\CursorLingo", appData);
+            CreateDirectoryW(dir, nullptr);
+        }
+        CoTaskMemFree(appData);
+        swprintf(g_ini, MAX_PATH, L"%ls\\CursorLingo.ini", dir);
+    }
+    swprintf(g_wordsFile, MAX_PATH, L"%ls\\CursorLingo.words", dir);
+}
+
+// The profile functions write UTF-16 only into a file that already starts with a UTF-16 byte order mark.
+static void EnsureIni() {
+    HANDLE f = CreateFileW(g_ini, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;  // already there
+    const WORD bom = 0xFEFF;
+    DWORD written;
+    WriteFile(f, &bom, sizeof(bom), &written, nullptr);
+    CloseHandle(f);
 }
 
 static void LoadSettings() {
-    HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return;
-    g_set.style = RegReadDword(k, L"Style", STYLE_COLOR, STYLE_COUNT);
-    g_set.mode = RegReadDword(k, L"Mode", MODE_ALWAYS, MODE_COUNT);
-    g_set.size = RegReadDword(k, L"Size", SIZE_MEDIUM, SIZE_COUNT);
-    g_set.autoFix = RegReadDword(k, L"AutoFix", 0, 2);
-    DWORD cb = sizeof(g_set.hidden) - sizeof(wchar_t);
-    if (RegQueryValueExW(k, L"Hidden", nullptr, nullptr, (BYTE*)g_set.hidden, &cb) != ERROR_SUCCESS) g_set.hidden[0] = 0;
-    g_set.hidden[255] = 0;
-    RegCloseKey(k);
+    for (const SettingField& f : kFields) {
+        UINT v = GetPrivateProfileIntW(L"Settings", f.name, (INT)f.def, g_ini);
+        *f.value = v < f.max ? v : f.def;
+    }
+    GetPrivateProfileStringW(L"Settings", L"Hidden", L"", g_set.hidden, 256, g_ini);
 }
 
 static void SaveSettings() {
-    HKEY k;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
-    RegSetValueExW(k, L"Style", 0, REG_DWORD, (BYTE*)&g_set.style, sizeof(DWORD));
-    RegSetValueExW(k, L"Mode", 0, REG_DWORD, (BYTE*)&g_set.mode, sizeof(DWORD));
-    RegSetValueExW(k, L"Size", 0, REG_DWORD, (BYTE*)&g_set.size, sizeof(DWORD));
-    RegSetValueExW(k, L"AutoFix", 0, REG_DWORD, (BYTE*)&g_set.autoFix, sizeof(DWORD));
-    RegSetValueExW(k, L"Hidden", 0, REG_SZ, (BYTE*)g_set.hidden, (DWORD)((wcslen(g_set.hidden) + 1) * sizeof(wchar_t)));
-    RegCloseKey(k);
+    EnsureIni();
+    wchar_t v[16];
+    for (const SettingField& f : kFields) {
+        swprintf(v, 16, L"%lu", (unsigned long)*f.value);
+        WritePrivateProfileStringW(L"Settings", f.name, v, g_ini);
+    }
+    WritePrivateProfileStringW(L"Settings", L"Hidden", g_set.hidden, g_ini);
 }
+
+// 1 when the menu speaks Thai, 0 for English.
+static int UiThai() {
+    if (g_set.uiLang) return g_set.uiLang == 2;
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_THAI;
+}
+#define TR(en, th) (UiThai() ? (th) : (en))
 
 static bool IsHidden(const wchar_t* code) {
     wchar_t needle[8];
@@ -106,26 +164,65 @@ static void ToggleHidden(const wchar_t* code) {
     }
 }
 
+// "Start with Windows" is a shortcut in the user's Startup folder: no registry entry, and it shows up (and can be
+// switched off) in Task Manager's Startup apps like any other.
+static bool StartupLinkPath(wchar_t* out) {
+    wchar_t* folder = nullptr;
+    bool ok = SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Startup, 0, nullptr, &folder));
+    if (ok) swprintf(out, MAX_PATH, L"%ls\\CursorLingo.lnk", folder);
+    CoTaskMemFree(folder);
+    return ok;
+}
+
 static bool StartupEnabled() {
-    HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return false;
-    bool on = RegQueryValueExW(k, kAppName, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
-    RegCloseKey(k);
-    return on;
+    wchar_t link[MAX_PATH];
+    return StartupLinkPath(link) && GetFileAttributesW(link) != INVALID_FILE_ATTRIBUTES;
 }
 
 static void SetStartup(bool on) {
-    HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_WRITE, &k) != ERROR_SUCCESS) return;
-    if (on) {
-        wchar_t path[MAX_PATH], cmd[MAX_PATH + 4];
-        GetModuleFileNameW(nullptr, path, MAX_PATH);
-        swprintf(cmd, MAX_PATH + 4, L"\"%ls\"", path);
-        RegSetValueExW(k, kAppName, 0, REG_SZ, (BYTE*)cmd, (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
-    } else {
-        RegDeleteValueW(k, kAppName);
+    wchar_t link[MAX_PATH], exe[MAX_PATH], dir[MAX_PATH];
+    if (!StartupLinkPath(link)) return;
+    if (!on) { DeleteFileW(link); return; }
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    wcscpy(dir, exe);
+    if (wchar_t* slash = wcsrchr(dir, L'\\')) *slash = 0;
+    IShellLinkW* sl = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&sl)))) return;
+    sl->SetPath(exe);
+    sl->SetWorkingDirectory(dir);
+    IPersistFile* pf = nullptr;
+    if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&pf)))) {
+        pf->Save(link, TRUE);
+        pf->Release();
     }
-    RegCloseKey(k);
+    sl->Release();
+}
+
+// Versions up to 1.1.4 kept their settings under HKCU\Software\CursorLingo and started from the Run key. Carry them
+// over into the files once, then remove what they left in the registry.
+static void MigrateFromRegistry() {
+    HKEY k;
+    if (GetFileAttributesW(g_ini) == INVALID_FILE_ATTRIBUTES &&
+        RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\CursorLingo", 0, KEY_READ, &k) == ERROR_SUCCESS) {
+        for (const SettingField& f : kFields) {
+            DWORD v = 0, cb = sizeof(v);
+            if (RegQueryValueExW(k, f.name, nullptr, nullptr, (BYTE*)&v, &cb) == ERROR_SUCCESS && v < f.max) *f.value = v;
+        }
+        DWORD cb = sizeof(g_set.hidden) - sizeof(wchar_t);
+        if (RegQueryValueExW(k, L"Hidden", nullptr, nullptr, (BYTE*)g_set.hidden, &cb) != ERROR_SUCCESS) g_set.hidden[0] = 0;
+        g_set.hidden[255] = 0;
+        RegCloseKey(k);
+        SaveSettings();
+        RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\CursorLingo");
+    }
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ | KEY_WRITE, &k) ==
+        ERROR_SUCCESS) {
+        if (RegQueryValueExW(k, kAppName, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+            SetStartup(true);
+            RegDeleteValueW(k, kAppName);
+        }
+        RegCloseKey(k);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,9 +432,11 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 #define WM_APP_TRAY (WM_APP + 2)
 #define WM_APP_FIX (WM_APP + 3)
 #define WM_APP_SELECTION (WM_APP + 4)
+#define WM_APP_SAVE_WORDS (WM_APP + 5)
 enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5 };
 enum {
-    ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_AUTOFIX, ID_QUIT,
+    ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_QUIT, ID_CODE_EDITORS, ID_REPORT, ID_FORGET_WORDS, ID_PER_APP,
+    ID_FIX_BASE = 150, ID_UILANG_BASE = 160,
     ID_STYLE_BASE = 200, ID_MODE_BASE = 300, ID_SIZE_BASE = 400,
 };
 
@@ -499,8 +598,14 @@ static void Refresh(bool switched) {
 
 static FixWord g_jobs[4];  // hand-off to the message loop: what is on screen, to be flipped
 static int g_jobHead = 0, g_jobTail = 0;
-static FixWord g_ignored[64];  // words whose fix the user undid (memory only)
-static int g_ignoredCount = 0;
+// The personal word list: words the user flipped with double Shift. In layout `shown`, always convert the word
+// (`fix`), or never. Saved in CursorLingo.words so it survives restarts; "Forget learned words" clears it.
+struct Rule {
+    uint8_t n, shown, fix;
+    uint8_t keys[lf::kMaxWord];
+};
+static Rule g_rules[500];
+static int g_ruleCount = 0;
 static bool g_shiftDown = false, g_shiftClean = false;
 static DWORD g_shiftDownAt = 0, g_lastShiftTap = 0;
 
@@ -521,18 +626,124 @@ static bool ForegroundIsTerminal() {
            wcscmp(cls, L"mintty") == 0;
 }
 
-static bool IsIgnored(const FixWord& w, bool prefix) {
-    for (int i = 0; i < g_ignoredCount; i++) {
-        const FixWord& g = g_ignored[i];
-        if ((prefix ? g.n >= w.n : g.n == w.n) && memcmp(g.keys, w.keys, w.n) == 0) return true;
-    }
+static wchar_t g_fgExe[64];  // file name of the foreground app's exe, lower case ("" if unknown)
+
+static void ReadForegroundExe() {
+    g_fgExe[0] = 0;
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (!fg || !GetWindowThreadProcessId(fg, &pid)) return;
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return;
+    wchar_t path[MAX_PATH];
+    DWORD n = MAX_PATH;
+    bool ok = QueryFullProcessImageNameW(p, 0, path, &n) != 0;
+    CloseHandle(p);
+    if (!ok) return;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    wcsncpy(g_fgExe, name ? name + 1 : path, 63);
+    g_fgExe[63] = 0;
+    for (wchar_t* c = g_fgExe; *c; c++) *c = (wchar_t)towlower(*c);
+}
+
+// Identifiers often look like gibberish, so code editors are left to double Shift (when that option is on).
+static bool ForegroundIsCodeEditor() {
+    static const wchar_t* kEditors[] = {
+        L"code.exe", L"code - insiders.exe", L"vscodium.exe", L"cursor.exe", L"windsurf.exe", L"zed.exe",
+        L"devenv.exe", L"sublime_text.exe", L"notepad++.exe", L"studio64.exe", L"idea64.exe", L"pycharm64.exe",
+        L"webstorm64.exe", L"phpstorm64.exe", L"clion64.exe", L"goland64.exe", L"rider64.exe", L"rubymine64.exe",
+        L"datagrip64.exe", L"rustrover64.exe", L"fleet.exe", L"gvim.exe"};
+    for (const wchar_t* e : kEditors)
+        if (wcscmp(g_fgExe, e) == 0) return true;
     return false;
 }
 
-static void Ignore(const FixWord& w) {
-    if (IsIgnored(w, false)) return;
-    if (g_ignoredCount == 64) { memmove(g_ignored, g_ignored + 1, sizeof(FixWord) * 63); g_ignoredCount--; }
-    g_ignored[g_ignoredCount++] = w;
+static bool g_inTerminal = false, g_inCodeEditor = false;  // the foreground app, refreshed when it changes
+
+static void ClassifyForeground() {
+    ReadForegroundExe();
+    g_inTerminal = ForegroundIsTerminal();
+    g_inCodeEditor = ForegroundIsCodeEditor();
+}
+
+// May this word be fixed without being asked to (double Shift always works)?
+static bool AutoAllowed() {
+    return g_set.fixAsYouType && !g_inTerminal && !(g_set.codeEditorsManual && g_inCodeEditor);
+}
+
+// The rule for this word in layout `shown` (or, with `prefix`, a keep rule for a word starting like it).
+static const Rule* FindRule(const FixWord& w, bool prefix) {
+    for (int i = 0; i < g_ruleCount; i++) {
+        const Rule& r = g_rules[i];
+        if (r.shown != w.shown || (prefix ? r.fix || r.n < w.n : r.n != w.n)) continue;
+        if (memcmp(r.keys, w.keys, w.n) == 0) return &r;
+    }
+    return nullptr;
+}
+static bool IsKept(const FixWord& w, bool prefix) {
+    const Rule* r = FindRule(w, prefix);
+    return r && !r->fix;
+}
+
+// A word the user just flipped with double Shift. Back to the layout it was typed in: they want it as typed, so
+// it is never fixed again. Into the other layout: fix it by itself from now on.
+static void Learn(const FixWord& w) {
+    bool fix = w.shown != w.typed;
+    if (w.n <= 0 || (fix && w.n < 2)) return;
+    FixWord typed = w;
+    typed.shown = w.typed;
+    for (int i = 0; i < g_ruleCount; i++)
+        if (g_rules[i].shown == typed.shown && g_rules[i].n == w.n && memcmp(g_rules[i].keys, w.keys, w.n) == 0) {
+            memmove(g_rules + i, g_rules + i + 1, sizeof(Rule) * (g_ruleCount - i - 1));
+            g_ruleCount--;
+            break;
+        }
+    if (g_ruleCount == 500) { memmove(g_rules, g_rules + 1, sizeof(Rule) * 499); g_ruleCount--; }
+    Rule& r = g_rules[g_ruleCount++];
+    r.n = (uint8_t)w.n;
+    r.shown = (uint8_t)typed.shown;
+    r.fix = fix;
+    memcpy(r.keys, w.keys, w.n);
+    PostMessageW(g_host, WM_APP_SAVE_WORDS, 0, 0);  // not from inside the hook
+}
+
+// Stored as a small binary file: per word, its length, (layout | fix << 1), then the keys.
+static void SaveRules() {
+    static uint8_t buf[500 * (lf::kMaxWord + 2)];
+    DWORD len = 0;
+    for (int i = 0; i < g_ruleCount; i++) {
+        buf[len++] = g_rules[i].n;
+        buf[len++] = (uint8_t)(g_rules[i].shown | (g_rules[i].fix << 1));
+        memcpy(buf + len, g_rules[i].keys, g_rules[i].n);
+        len += g_rules[i].n;
+    }
+    if (!len) { DeleteFileW(g_wordsFile); return; }
+    HANDLE f = CreateFileW(g_wordsFile, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD written;
+    WriteFile(f, buf, len, &written, nullptr);
+    CloseHandle(f);
+}
+
+static void LoadRules() {
+    static uint8_t buf[500 * (lf::kMaxWord + 2)];
+    DWORD len = 0;
+    g_ruleCount = 0;
+    HANDLE f = CreateFileW(g_wordsFile, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    bool ok = ReadFile(f, buf, sizeof(buf), &len, nullptr) != 0;
+    CloseHandle(f);
+    if (!ok) return;
+    for (DWORD i = 0; i + 2 <= len && g_ruleCount < 500;) {
+        uint8_t n = buf[i], flags = buf[i + 1];
+        if (n == 0 || n > lf::kMaxWord || i + 2 + n > len) break;
+        Rule& r = g_rules[g_ruleCount++];
+        r.n = n;
+        r.shown = flags & 1;
+        r.fix = (flags >> 1) & 1;
+        memcpy(r.keys, buf + i + 2, n);
+        i += 2 + n;
+    }
 }
 
 // Queues `w` (as it is on screen now) to be flipped to the other layout, and records the flip.
@@ -552,15 +763,15 @@ static void ToggleWord() {
     if (!w) { PostMessageW(g_host, WM_APP_SELECTION, 0, 0); return; }  // nothing typed: convert the selection
     if (g_fixLang < 0) return;
     QueueFlip(*w);
-    if (w->shown == w->typed) Ignore(*w);
+    Learn(*w);
 }
 
 static void EndOfWord() {
     FixWord w = g_word;
     w.trailing = 1;
     g_word.n = 0;
-    if (!w.decided && w.n >= 2 && w.shown >= 0 && !IsIgnored(w, false) && !ForegroundIsTerminal() &&
-        lf::shouldConvert(w.keys, w.n, (lf::Lang)w.shown, true))
+    if (!w.decided && w.n >= 2 && w.shown >= 0 && AutoAllowed() && !IsKept(w, false) &&
+        (FindRule(w, false) || lf::shouldConvert(w.keys, w.n, (lf::Lang)w.shown, true)))
         QueueFlip(w);
     g_last = w;
 }
@@ -610,7 +821,7 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wp, LPARAM lp) {
             }
             g_word.keys[g_word.n++] = (uint8_t)(idx | ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ? lf::kShiftBit : 0));
             // A long run without spaces (typical for Thai) is checked as it grows, so it is fixed early.
-            if (!g_word.decided && g_word.shown == 0 && g_word.n >= 6 && !IsIgnored(g_word, true) &&
+            if (!g_word.decided && g_word.shown == 0 && g_word.n >= 6 && AutoAllowed() && !IsKept(g_word, true) &&
                 lf::shouldConvert(g_word.keys, g_word.n, lf::LANG_EN, false))
                 QueueFlip(g_word);
         }
@@ -828,8 +1039,48 @@ static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
+// ---------------------------------------------------------------------------
+// Language per app
+// ---------------------------------------------------------------------------
+//
+// Remembers the layout each app (by exe name) was last used with, and switches back to it when that app comes to
+// the front. Saved in the [AppLanguages] section of CursorLingo.ini.
+
+static DWORD g_appSwitchUntil = 0;  // a switch we requested is still landing: don't record the old layout
+static HKL g_appSwitchTo = nullptr;
+
+static void RememberAppLanguage(HKL hkl) {
+    if (!g_set.perAppLanguage || !g_fgExe[0] || !hkl) return;
+    if (GetTickCount() < g_appSwitchUntil && hkl != g_appSwitchTo) return;
+    wchar_t v[24];
+    swprintf(v, 24, L"%llx", (unsigned long long)(UINT_PTR)hkl);
+    EnsureIni();
+    WritePrivateProfileStringW(L"AppLanguages", g_fgExe, v, g_ini);
+}
+
+// The foreground app just changed: give it back its layout, or remember the one it has.
+static void ApplyAppLanguage() {
+    if (!g_set.perAppLanguage || !g_fgExe[0]) return;
+    wchar_t v[24];
+    HKL now = CurrentHkl();
+    if (!GetPrivateProfileStringW(L"AppLanguages", g_fgExe, L"", v, 24, g_ini)) {
+        RememberAppLanguage(now);
+        return;
+    }
+    HKL want = (HKL)(UINT_PTR)wcstoull(v, nullptr, 16);
+    HKL list[64];
+    int n = GetKeyboardLayoutList(64, list), i = 0;
+    while (i < n && list[i] != want) i++;
+    if (want == now || i == n) return;  // already there, or that layout was removed
+    g_appSwitchTo = want;
+    g_appSwitchUntil = GetTickCount() + 1000;
+    if (HWND fg = GetForegroundWindow()) PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)want);
+}
+
 static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
     g_fullscreen = ForegroundIsFullscreen();
+    ClassifyForeground();
+    ApplyAppLanguage();
     ResetWords();
     bool changed = UpdateLanguage();
     Refresh(changed);
@@ -851,26 +1102,58 @@ static void AddTrayIcon() {
     UpdateTrayIcon();
 }
 
+// After sleep or a screen lock Windows may have dropped our low-level hooks (it removes hooks that time out,
+// e.g. while the machine is busy waking up), and the word in memory no longer matches the screen.
+// Hooking again is cheap, so do it unconditionally.
+static void ReinstallHooks() {
+    if (g_mouseHook) UnhookWindowsHookEx(g_mouseHook);
+    g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, g_inst, 0);
+    if (g_kbHook) { SetAutoFix(false); SetAutoFix(true); }
+    g_shiftDown = g_shiftClean = false;
+    g_lastShiftTap = 0;
+    ClassifyForeground();
+    if (UpdateLanguage()) Refresh(true);
+}
+
 static void ShowMenu() {
-    HMENU m = CreatePopupMenu(), style = CreatePopupMenu(), mode = CreatePopupMenu(), size = CreatePopupMenu();
+    HMENU m = CreatePopupMenu(), style = CreatePopupMenu(), mode = CreatePopupMenu(), size = CreatePopupMenu(),
+          fix = CreatePopupMenu(), lang = CreatePopupMenu();
+    const int th = UiThai();
     wchar_t buf[64];
-    swprintf(buf, 64, L"Current input: %ls", g_code);
+    swprintf(buf, 64, TR(L"Current input: %ls", L"ภาษาที่ใช้อยู่: %ls"), g_code);
     AppendMenuW(m, MF_STRING | MF_GRAYED, 0, buf);
-    swprintf(buf, 64, L"Hide badge for %ls", g_code);
+    swprintf(buf, 64, TR(L"Hide badge for %ls", L"ซ่อนป้ายเมื่อเป็น %ls"), g_code);
     AppendMenuW(m, MF_STRING | (IsHidden(g_code) ? MF_CHECKED : 0), ID_HIDE_CURRENT, buf);
-    if (g_set.hidden[0]) AppendMenuW(m, MF_STRING, ID_SHOW_ALL, L"Show for all languages");
+    if (g_set.hidden[0]) AppendMenuW(m, MF_STRING, ID_SHOW_ALL, TR(L"Show for all languages", L"แสดงป้ายทุกภาษา"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    for (int i = 0; i < MODE_COUNT; i++) AppendMenuW(mode, MF_STRING | (g_set.mode == (DWORD)i ? MF_CHECKED : 0), ID_MODE_BASE + i, kModeNames[i]);
-    for (int i = 0; i < STYLE_COUNT; i++) AppendMenuW(style, MF_STRING | (g_set.style == (DWORD)i ? MF_CHECKED : 0), ID_STYLE_BASE + i, kStyleNames[i]);
-    for (int i = 0; i < SIZE_COUNT; i++) AppendMenuW(size, MF_STRING | (g_set.size == (DWORD)i ? MF_CHECKED : 0), ID_SIZE_BASE + i, kSizeNames[i]);
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)mode, L"Show");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)style, L"Style");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)size, L"Size");
+    for (int i = 0; i < MODE_COUNT; i++) AppendMenuW(mode, MF_STRING | (g_set.mode == (DWORD)i ? MF_CHECKED : 0), ID_MODE_BASE + i, kModeNames[th][i]);
+    for (int i = 0; i < STYLE_COUNT; i++) AppendMenuW(style, MF_STRING | (g_set.style == (DWORD)i ? MF_CHECKED : 0), ID_STYLE_BASE + i, kStyleNames[th][i]);
+    for (int i = 0; i < SIZE_COUNT; i++) AppendMenuW(size, MF_STRING | (g_set.size == (DWORD)i ? MF_CHECKED : 0), ID_SIZE_BASE + i, kSizeNames[th][i]);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)mode, TR(L"Show", L"แสดงป้าย"));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)style, TR(L"Style", L"รูปแบบ"));
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)size, TR(L"Size", L"ขนาด"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_set.autoFix ? MF_CHECKED : 0), ID_AUTOFIX, L"Auto-fix wrong language (EN \u21C4 TH)  \u00B7  Shift Shift: convert word / selection");
-    AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, L"Start with Windows");
+    // One menu for the whole feature: Off, Double Shift only (fix on request) or Automatic.
+    const int fixMode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
+    for (int i = 0; i < 3; i++) AppendMenuW(fix, MF_STRING | (fixMode == i ? MF_CHECKED : 0), ID_FIX_BASE + i, kFixNames[th][i]);
+    AppendMenuW(fix, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(fix, MF_STRING | (g_set.codeEditorsManual ? MF_CHECKED : 0) | (fixMode == 2 ? 0 : MF_GRAYED),
+                ID_CODE_EDITORS, TR(L"In code editors: double Shift only", L"ใน code editor แก้เฉพาะตอนกด Shift 2 ครั้ง"));
+    wchar_t learned[64];
+    if (!g_ruleCount) wcscpy(learned, TR(L"Learned words: none yet", L"ยังไม่มีคำที่จำไว้"));
+    else if (th) swprintf(learned, 64, L"ล้างคำที่จำไว้ (%d คำ)", g_ruleCount);
+    else swprintf(learned, 64, L"Forget %d learned word%ls", g_ruleCount, g_ruleCount == 1 ? L"" : L"s");
+    AppendMenuW(fix, MF_STRING | (g_ruleCount ? 0 : MF_GRAYED), ID_FORGET_WORDS, learned);
+    wchar_t fixTitle[96];
+    swprintf(fixTitle, 96, TR(L"Fix wrong language (EN \u21C4 TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH): %ls"), kFixNames[th][fixMode]);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)fix, fixTitle);
+    AppendMenuW(m, MF_STRING | (g_set.perAppLanguage ? MF_CHECKED : 0), ID_PER_APP, TR(L"Remember language per app", L"จำภาษาของแต่ละแอป"));
+    AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, TR(L"Start with Windows", L"เปิดพร้อม Windows"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit CursorLingo");
+    for (int i = 0; i < 3; i++) AppendMenuW(lang, MF_STRING | (g_set.uiLang == (DWORD)i ? MF_CHECKED : 0), ID_UILANG_BASE + i, kUiLangNames[th][i]);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)lang, L"Language / ภาษา");  // bilingual, so it can always be found
+    AppendMenuW(m, MF_STRING, ID_REPORT, TR(L"Report a wrong fix or bug\u2026", L"แจ้งปัญหาหรือคำที่แก้ผิด\u2026"));
+    AppendMenuW(m, MF_STRING, ID_QUIT, TR(L"Quit CursorLingo", L"ปิด CursorLingo"));
 
     POINT pt;
     GetCursorPos(&pt);
@@ -881,8 +1164,31 @@ static void ShowMenu() {
     if (!cmd) return;
     if (cmd == ID_QUIT) { DestroyWindow(g_host); return; }
     if (cmd == ID_STARTUP) { SetStartup(!StartupEnabled()); return; }
-    if (cmd == ID_AUTOFIX) {
-        g_set.autoFix = !g_set.autoFix;
+    if (cmd == ID_REPORT) {  // only opens the issue form; nothing typed is ever attached
+        ShellExecuteW(nullptr, L"open", L"https://github.com/kittipongint/cursor-lingo/issues/new/choose", nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
+    if (cmd == ID_FORGET_WORDS) { g_ruleCount = 0; SaveRules(); return; }
+    if (cmd == ID_PER_APP) {
+        g_set.perAppLanguage = !g_set.perAppLanguage;
+        SaveSettings();
+        RememberAppLanguage(CurrentHkl());
+        return;
+    }
+    if (cmd >= ID_UILANG_BASE && cmd < ID_UILANG_BASE + 3) {
+        g_set.uiLang = cmd - ID_UILANG_BASE;
+        SaveSettings();
+        return;
+    }
+    if (cmd == ID_CODE_EDITORS) {
+        g_set.codeEditorsManual = !g_set.codeEditorsManual;
+        SaveSettings();
+        return;
+    }
+    if (cmd >= ID_FIX_BASE && cmd < ID_FIX_BASE + 3) {
+        int pick = cmd - ID_FIX_BASE;  // stored as AutoFix (on/off) + FixAsYouType, so older settings carry over
+        g_set.autoFix = pick != 0;
+        if (pick) g_set.fixAsYouType = pick == 2;
         SetAutoFix(g_set.autoFix != 0);
         SaveSettings();
         return;
@@ -908,7 +1214,9 @@ static LRESULT CALLBACK BadgeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_POLL) {
                 // There is no system-wide "layout changed" event, so poll this one cheap call.
+                HKL before = g_lastHkl;
                 if (UpdateLanguage()) Refresh(true);
+                if (g_lastHkl != before) RememberAppLanguage(g_lastHkl);
             } else if (wp == TIMER_HIDE) {
                 KillTimer(h, TIMER_HIDE);
                 SetVisible(false, true);
@@ -940,9 +1248,18 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_SELECTION:
             BeginSelectionCopy();
             return 0;
+        case WM_APP_SAVE_WORDS:
+            SaveRules();
+            return 0;
         case WM_TIMER:
             if (wp == TIMER_COPY) CheckSelectionCopy();
             if (wp == TIMER_RESTORE) { KillTimer(h, TIMER_RESTORE); RestoreClipboard(); }
+            return 0;
+        case WM_POWERBROADCAST:
+            if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) ReinstallHooks();
+            return TRUE;
+        case WM_WTSSESSION_CHANGE:
+            if (wp == WTS_SESSION_UNLOCK || wp == WTS_CONSOLE_CONNECT || wp == WTS_REMOTE_CONNECT) ReinstallHooks();
             return 0;
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:
@@ -962,6 +1279,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_inst = inst;
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // for the Startup-folder shortcut
+    FindSettingsFiles();
+    MigrateFromRegistry();
     LoadSettings();
 
     WNDCLASSW wc = {};
@@ -990,7 +1310,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (StartupEnabled()) SetStartup(true);
 
     g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, inst, 0);
+    ClassifyForeground();
+    LoadRules();
     if (g_set.autoFix) SetAutoFix(true);
+    WTSRegisterSessionNotification(g_host, NOTIFY_FOR_THIS_SESSION);  // screen lock / unlock
     g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundChanged, 0, 0,
                                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     // Coalescable timer lets Windows batch our wake-ups with others to save power.
@@ -1002,10 +1325,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
 
+    WTSUnRegisterSessionNotification(g_host);
     UnhookWindowsHookEx(g_mouseHook);
     SetAutoFix(false);
     UnhookWinEvent(g_fgHook);
     if (g_trayIcon) DestroyIcon(g_trayIcon);
+    CoUninitialize();
     ReleaseMutex(mutex);
     return 0;
 }

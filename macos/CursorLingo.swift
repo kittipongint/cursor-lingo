@@ -4,7 +4,7 @@
 //   * Event-driven: no polling timers. The badge moves on mouse events and redraws
 //     only when the input source changes.
 //   * Tiny footprint: one borderless click-through panel, one status item, no network.
-//   * Keyboard monitoring exists only for the optional "Auto-fix wrong language" feature. It is
+//   * Keyboard monitoring exists only for the optional "Fix Wrong Language" feature. It is
 //     off by default, needs explicit macOS permission, and keeps nothing but the word being typed.
 //   * Optional launch at login (SMAppService, with a LaunchAgent fallback).
 
@@ -12,20 +12,51 @@ import AppKit
 import Carbon
 import ServiceManagement
 
+// MARK: - Menu language
+
+/// The menu speaks English or Thai: the system's language by default, or what the user picked.
+enum UILanguage: String, CaseIterable {
+    case system = "System", english = "English", thai = "Thai"
+    var title: String { self == .system ? tr("System", "ตามภาษาของระบบ") : self == .english ? "English" : "ไทย" }
+}
+
+/// The English or the Thai text, whichever the menu currently speaks.
+func tr(_ en: String, _ th: String) -> String {
+    switch Settings.uiLanguage {
+    case .english: return en
+    case .thai: return th
+    case .system: return Locale.preferredLanguages.first?.hasPrefix("th") == true ? th : en
+    }
+}
+
 // MARK: - Settings
+
+// Raw values are what is stored in the preferences; `title` is what the menu shows.
 
 enum BadgeStyle: String, CaseIterable {
     case color = "Color", light = "Light", dark = "Dark", dot = "Dot"
+    var title: String { [.color: tr("Color", "สีสด"), .light: tr("Light", "โทนสว่าง"), .dark: tr("Dark", "โทนมืด"), .dot: tr("Dot", "จุดเล็ก")][self]! }
+}
+
+/// Fix Wrong Language: off, only when double Shift asks for it, or also by itself as you type.
+enum FixMode: String, CaseIterable {
+    case off = "Off", manual = "Double Shift Only", automatic = "Automatic"
+    var title: String {
+        [.off: tr("Off", "ปิด"), .manual: tr("Double Shift Only", "กด Shift 2 ครั้งเพื่อแก้"),
+         .automatic: tr("Automatic", "แก้ให้อัตโนมัติ")][self]!
+    }
 }
 
 enum DisplayMode: String, CaseIterable {
     case always = "Always"
     case onSwitch = "Only when switching"
+    var title: String { self == .always ? tr("Always", "ตลอดเวลา") : tr("Only when switching", "เฉพาะตอนเปลี่ยนภาษา") }
 }
 
 enum BadgeSize: String, CaseIterable {
     case small = "Small", medium = "Medium", large = "Large"
     var scale: CGFloat { self == .small ? 0.85 : (self == .large ? 1.3 : 1.0) }
+    var title: String { [.small: tr("Small", "เล็ก"), .medium: tr("Medium", "กลาง"), .large: tr("Large", "ใหญ่")][self]! }
 }
 
 struct Settings {
@@ -47,6 +78,37 @@ struct Settings {
     static var autoFix: Bool {
         get { d.bool(forKey: "autoFix") }
         set { d.set(newValue, forKey: "autoFix") }
+    }
+    /// With Auto-fix on: fix words by themselves (true), or only when double Shift asks for it (false).
+    static var fixAsYouType: Bool {
+        get { d.object(forKey: "fixAsYouType") as? Bool ?? true }
+        set { d.set(newValue, forKey: "fixAsYouType") }
+    }
+    /// In code editors identifiers often look like gibberish, so there only double Shift converts. On by default.
+    static var codeEditorsManual: Bool {
+        get { d.object(forKey: "codeEditorsManual") as? Bool ?? true }
+        set { d.set(newValue, forKey: "codeEditorsManual") }
+    }
+    /// The Fix Wrong Language menu: stored as autoFix (on/off) + fixAsYouType, so older settings carry over.
+    static var fixMode: FixMode { !autoFix ? .off : fixAsYouType ? .automatic : .manual }
+    /// The personal word list (see AutoFix.Rule), one entry per word: "<layout><+|->" then the keys in hex.
+    static var personalWords: [String] {
+        get { d.stringArray(forKey: "personalWords") ?? [] }
+        set { d.set(newValue, forKey: "personalWords") }
+    }
+    /// Switch to the layout each app was last used with when it comes to the front. Off by default.
+    static var perAppLanguage: Bool {
+        get { d.bool(forKey: "perAppLanguage") }
+        set { d.set(newValue, forKey: "perAppLanguage") }
+    }
+    static var uiLanguage: UILanguage {
+        get { UILanguage(rawValue: d.string(forKey: "uiLanguage") ?? "") ?? .system }
+        set { d.set(newValue.rawValue, forKey: "uiLanguage") }
+    }
+    /// Bundle ID -> input source ID it was last used with (for perAppLanguage).
+    static var appLanguages: [String: String] {
+        get { d.dictionary(forKey: "appLanguages") as? [String: String] ?? [:] }
+        set { d.set(newValue, forKey: "appLanguages") }
     }
     /// Language codes (e.g. "EN") for which the badge is hidden.
     static var hidden: Set<String> {
@@ -95,16 +157,19 @@ extension InputSource {
 
     /// Selects an enabled US/ABC (0) or Thai (1) layout.
     static func select(_ language: Int) {
-        let wanted = language == 0 ? enIDs : [thID]
-        guard let list = TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource] else { return }
-        for id in wanted {
-            for source in list {
-                guard let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID),
-                      (Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String) == id else { continue }
-                TISSelectInputSource(source)
-                return
-            }
+        for id in language == 0 ? enIDs : [thID] where select(id: id) { return }
+    }
+
+    /// Selects the enabled input source with this ID; false if there is none.
+    @discardableResult
+    static func select(id: String) -> Bool {
+        guard let list = TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource] else { return false }
+        for source in list {
+            guard let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID),
+                  (Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String) == id else { continue }
+            return TISSelectInputSource(source) == noErr
         }
+        return false
     }
 }
 
@@ -202,6 +267,21 @@ final class AutoFix {
         "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "org.alacritty",
         "com.github.wez.wezterm", "net.kovidgoyal.kitty", "dev.warp.Warp-Stable", "co.zeit.hyper",
     ]
+    private static let codeEditors: Set<String> = [
+        "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.vscodium", "com.todesktop.230313mzl4w4u92",
+        "com.exafunction.windsurf", "dev.zed.Zed", "dev.zed.Zed-Preview", "com.apple.dt.Xcode", "com.sublimetext.4",
+        "com.sublimetext.3", "com.panic.Nova", "com.google.android.studio", "org.vim.MacVim",
+    ]
+    private static func isCodeEditor(_ id: String) -> Bool { codeEditors.contains(id) || id.hasPrefix("com.jetbrains.") }
+
+    /// Fix words by themselves; when false only double Shift converts.
+    var fixAsYouType = true
+    /// Leave code editors to double Shift.
+    var codeEditorsManual = true
+    private var frontApp = ""            // bundle ID of the app being typed in
+    private var autoAllowed: Bool {
+        fixAsYouType && !AutoFix.terminals.contains(frontApp) && !(codeEditorsManual && AutoFix.isCodeEditor(frontApp))
+    }
 
     /// A word on screen: its physical keys, the layout it is shown in, the layout it was typed in, and how many
     /// spaces follow it. `decided` stops the detector from touching it again (fixed or toggled already).
@@ -217,7 +297,13 @@ final class AutoFix {
     private var runLoopSource: CFRunLoopSource?
     private var word = Word()            // being typed
     private var last: Word?              // finished, and nothing but spaces typed after it
-    private var ignored: [[UInt8]] = []  // words whose fix the user undid (this session only)
+    /// A word the user decided about with double Shift: in layout `shown`, always convert it (`fix`), or never.
+    struct Rule: Equatable {
+        var keys: [UInt8]
+        var shown: Int
+        var fix: Bool
+    }
+    private(set) var rules: [Rule] = []  // the personal word list; see learn(_:)
     private var language: Int?           // layout currently on screen: 0 = EN, 1 = TH, nil = unsupported
     private var expectedLanguage: Int?   // a layout switch we made ourselves: it must not end the word
     private var shiftDownAt: TimeInterval = 0
@@ -233,14 +319,25 @@ final class AutoFix {
         if !CGPreflightPostEventAccess() { _ = CGRequestPostEventAccess() }
     }
 
-    /// What the menu shows under the Auto-fix item, so a silent failure is never invisible.
-    var status: String {
-        if !CGPreflightListenEventAccess() { return "Needs Input Monitoring permission" }
-        if !CGPreflightPostEventAccess() { return "Needs Accessibility permission" }
-        if tap == nil { return "Not running yet: relaunch CursorLingo" }
-        if IsSecureEventInputEnabled() { return "Paused: secure input (a password field) is on" }
-        if InputSource.fixLanguage() == nil { return "Paused: this layout isn't supported" }
-        return "Active · double-tap Shift: convert word / selection, or undo"
+    enum Problem { case permission, notRunning }
+
+    /// What the menu shows under Fix Wrong Language, so a silent failure is never invisible.
+    var status: (text: String, problem: Problem?) {
+        if !CGPreflightListenEventAccess() {
+            return (tr("Needs Input Monitoring permission", "ยังไม่ได้อนุญาต Input Monitoring"), .permission)
+        }
+        if !CGPreflightPostEventAccess() { return (tr("Needs Accessibility permission", "ยังไม่ได้อนุญาต Accessibility"), .permission) }
+        if tap == nil { return (tr("Not running yet: relaunch CursorLingo", "ยังไม่เริ่มทำงาน ลองเปิด CursorLingo ใหม่"), .notRunning) }
+        if IsSecureEventInputEnabled() {
+            return (tr("Paused: secure input (a password field) is on", "พักไว้ระหว่างพิมพ์รหัสผ่าน"), nil)
+        }
+        if InputSource.fixLanguage() == nil { return (tr("Paused: this layout isn't supported", "พักไว้: ยังไม่รองรับแป้นพิมพ์นี้"), nil) }
+        if !fixAsYouType {
+            return (tr("Active · double-tap Shift converts a word or selection",
+                       "พร้อมใช้ · กด Shift 2 ครั้งเพื่อแก้คำหรือข้อความที่เลือก"), nil)
+        }
+        return (tr("Active · double-tap Shift: convert word / selection, or undo",
+                   "พร้อมใช้ · กด Shift 2 ครั้งเพื่อแก้คำ ข้อความที่เลือก หรือย้อนคืน"), nil)
     }
 
     @discardableResult
@@ -288,11 +385,26 @@ final class AutoFix {
         word = Word()
         last = nil
         lastShiftTap = 0
+        frontApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+    }
+
+    /// After sleep, a screen lock or a user switch: make sure the tap still listens, and start from a clean slate.
+    func recover() {
+        guard let port = tap else { return }
+        if !CFMachPortIsValid(port) {
+            stop()
+            start()
+            return
+        }
+        if !CGEvent.tapIsEnabled(tap: port) { CGEvent.tapEnable(tap: port, enable: true) }
+        shiftClean = false
+        inputChanged()
+        reset()
     }
 
     private func handle(_ type: CGEventType, _ event: CGEvent) {
         switch type {
-        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:  // macOS switched the tap off: switch it back on
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             reset()
             return
@@ -346,7 +458,7 @@ final class AutoFix {
         word.keys.append(UInt8(index) | (flags.contains(.maskShift) ? 0x80 : 0))
 
         // A long run with no spaces (typical for Thai) is checked as it grows, so it is fixed early.
-        if !word.decided, word.shown == 0, word.keys.count >= 6, !isIgnored(word.keys, prefix: true),
+        if !word.decided, word.shown == 0, word.keys.count >= 6, autoAllowed, !isKept(word, prefix: true),
            lf_should_convert(word.keys, Int32(word.keys.count), 0, false) {
             convert(&word)
         }
@@ -356,23 +468,22 @@ final class AutoFix {
         var w = word
         w.trailing = 1
         word = Word()
-        if !w.decided, w.keys.count >= 2, !isIgnored(w.keys, prefix: false),
-           !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""),
-           lf_should_convert(w.keys, Int32(w.keys.count), Int32(w.shown), true) {
+        if !w.decided, w.keys.count >= 2, autoAllowed, !isKept(w, prefix: false),
+           rules.contains(Rule(keys: w.keys, shown: w.shown, fix: true))
+            || lf_should_convert(w.keys, Int32(w.keys.count), Int32(w.shown), true) {
             convert(&w)
         }
         last = w
     }
 
-    /// Double Shift: flip the word being typed, or else the last word. Flipping a word back to the layout it was
-    /// typed in means the user wants it as typed, so it is never auto-fixed again this session.
+    /// Double Shift: flip the word being typed, or else the last word, and learn from it (see learn(_:)).
     private func toggle() {
         if !word.keys.isEmpty {
             convert(&word)
-            if word.shown == word.typed { ignore(word.keys) }
+            learn(word)
         } else if var w = last {
             convert(&w)
-            if w.shown == w.typed { ignore(w.keys) }
+            learn(w)
             last = w
         } else {
             convertSelection()
@@ -398,7 +509,7 @@ final class AutoFix {
     }
 
     private func convertSelection() {
-        guard !AutoFix.terminals.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "") else { return }
+        guard !AutoFix.terminals.contains(frontApp) else { return }
         switch AutoFix.accessibilitySelection() {
         case .text(let text): replaceSelection(text)
         case .none: return
@@ -463,13 +574,46 @@ final class AutoFix {
         }
     }
 
-    private func isIgnored(_ keys: [UInt8], prefix: Bool) -> Bool {
-        ignored.contains { prefix ? $0.starts(with: keys) : $0 == keys }
+    // MARK: Personal word list
+
+    /// Should the word (or, mid-word, a word starting like it) be left as typed?
+    private func isKept(_ w: Word, prefix: Bool) -> Bool {
+        rules.contains { !$0.fix && $0.shown == w.shown && (prefix ? $0.keys.starts(with: w.keys) : $0.keys == w.keys) }
     }
 
-    private func ignore(_ keys: [UInt8]) {
-        if !isIgnored(keys, prefix: false) { ignored.append(keys) }
-        if ignored.count > 200 { ignored.removeFirst() }
+    /// A word the user just flipped with double Shift. Back to the layout it was typed in: they want it as typed,
+    /// so it is never fixed again. Into the other layout: fix it by itself from now on.
+    private func learn(_ w: Word) {
+        let typedRule = Rule(keys: w.keys, shown: w.typed, fix: w.shown != w.typed)
+        if typedRule.fix && w.keys.count < 2 { return }
+        rules.removeAll { $0.keys == w.keys && $0.shown == w.typed }
+        rules.append(typedRule)
+        if rules.count > 500 { rules.removeFirst() }
+        save()
+    }
+
+    func loadRules() {
+        rules = Settings.personalWords.compactMap { entry in
+            let c = Array(entry.utf8)
+            guard c.count >= 4, c.count % 2 == 0, c[0] == 48 || c[0] == 49, c[1] == 43 || c[1] == 45 else { return nil }
+            var keys: [UInt8] = []
+            for i in stride(from: 2, to: c.count, by: 2) {
+                guard let k = UInt8(String(decoding: c[i...i+1], as: UTF8.self), radix: 16) else { return nil }
+                keys.append(k)
+            }
+            return Rule(keys: keys, shown: Int(c[0] - 48), fix: c[1] == 43)
+        }
+    }
+
+    private func save() {
+        Settings.personalWords = rules.map { r in
+            "\(r.shown)\(r.fix ? "+" : "-")" + r.keys.map { String(format: "%02x", $0) }.joined()
+        }
+    }
+
+    func forgetRules() {
+        rules = []
+        save()
     }
 
     /// Replaces the word on screen (and the spaces after it) with the other layout's reading of the same keys,
@@ -577,11 +721,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
 
         NSWorkspace.shared.notificationCenter.addObserver(
-            self, selector: #selector(frontAppChanged),
+            self, selector: #selector(frontAppChanged(_:)),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        // Sleep, lid close, screen lock and fast user switching can leave a stale word or a disabled tap behind.
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemResumed), name: name, object: nil)
+        }
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(systemResumed), name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
 
+        autoFix.fixAsYouType = Settings.fixAsYouType
+        autoFix.codeEditorsManual = Settings.codeEditorsManual
+        autoFix.loadRules()
         refresh(animated: false)
-        startAutoFix()   // never prompts at launch; see toggleAutoFix()
+        startAutoFix()   // never prompts at launch; see enableAutoFix()
     }
 
     /// Starts Auto-fix if it is wanted. Until macOS grants the permissions, retries every 2 s so that it
@@ -596,7 +750,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func frontAppChanged() { autoFix.reset() }
+    @objc private func frontAppChanged(_ note: Notification) {
+        autoFix.reset()
+        guard Settings.perAppLanguage,
+              let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier else { return }
+        // Each app gets back the layout it was last used with.
+        if let wanted = appLanguages[id] {
+            if wanted != InputSource.currentID() { InputSource.select(id: wanted) }
+        } else {
+            rememberAppLanguage()
+        }
+    }
+
+    private lazy var appLanguages = Settings.appLanguages
+
+    private func rememberAppLanguage() {
+        guard let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, id != Bundle.main.bundleIdentifier,
+              let source = InputSource.currentID(), appLanguages[id] != source else { return }
+        appLanguages[id] = source
+        if appLanguages.count > 300 { appLanguages.removeValue(forKey: appLanguages.keys.first!) }
+        Settings.appLanguages = appLanguages
+    }
+
+    @objc private func systemResumed() {
+        autoFix.recover()
+        refresh(animated: false)
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         monitors.forEach(NSEvent.removeMonitor)
@@ -638,7 +818,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
     }
 
-    @objc private func inputSourceChanged() { refresh(animated: true) }
+    @objc private func inputSourceChanged() {
+        if Settings.perAppLanguage { rememberAppLanguage() }
+        refresh(animated: true)
+    }
 
     private func refresh(animated: Bool) {
         autoFix.inputChanged()
@@ -716,33 +899,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         let code = InputSource.currentCode()
 
-        let header = NSMenuItem(title: "Current input: \(code)", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(title: tr("Current input: \(code)", "ภาษาที่ใช้อยู่: \(code)"), action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
-        let hideCurrent = item("Hide badge for \(code)", #selector(toggleHideCurrent), on: Settings.hidden.contains(code))
+        let hideCurrent = item(tr("Hide badge for \(code)", "ซ่อนป้ายเมื่อเป็น \(code)"), #selector(toggleHideCurrent), on: Settings.hidden.contains(code))
         menu.addItem(hideCurrent)
         if !Settings.hidden.isEmpty {
-            menu.addItem(item("Show for all languages", #selector(clearHidden)))
+            menu.addItem(item(tr("Show for all languages", "แสดงป้ายทุกภาษา"), #selector(clearHidden)))
         }
         menu.addItem(.separator())
 
-        menu.addItem(submenu("Show", DisplayMode.allCases.map(\.rawValue), selected: Settings.mode.rawValue, #selector(pickMode)))
-        menu.addItem(submenu("Style", BadgeStyle.allCases.map(\.rawValue), selected: Settings.style.rawValue, #selector(pickStyle)))
-        menu.addItem(submenu("Size", BadgeSize.allCases.map(\.rawValue), selected: Settings.size.rawValue, #selector(pickSize)))
+        menu.addItem(submenu(tr("Show", "แสดงป้าย"), DisplayMode.allCases.map { ($0.rawValue, $0.title) },
+                             selected: Settings.mode.rawValue, #selector(pickMode)))
+        menu.addItem(submenu(tr("Style", "รูปแบบ"), BadgeStyle.allCases.map { ($0.rawValue, $0.title) },
+                             selected: Settings.style.rawValue, #selector(pickStyle)))
+        menu.addItem(submenu(tr("Size", "ขนาด"), BadgeSize.allCases.map { ($0.rawValue, $0.title) },
+                             selected: Settings.size.rawValue, #selector(pickSize)))
         menu.addItem(.separator())
-        menu.addItem(item("Auto-fix wrong language (EN ⇄ TH)", #selector(toggleAutoFix), on: Settings.autoFix))
-        if Settings.autoFix {
+        // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic.
+        let fixItem = submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
+                              FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue,
+                              #selector(pickFixMode))
+        let fix = fixItem.submenu!
+        fix.addItem(.separator())
+        let editors = item(tr("In Code Editors: Double Shift Only", "ใน code editor แก้เฉพาะตอนกด Shift 2 ครั้ง"),
+                           #selector(toggleCodeEditorsManual), on: Settings.codeEditorsManual)
+        editors.isEnabled = Settings.fixMode == .automatic
+        fix.addItem(editors)
+        let learned = autoFix.rules.count
+        let forget = item(learned == 0 ? tr("Learned Words: None Yet", "ยังไม่มีคำที่จำไว้")
+                                       : tr("Forget \(learned) Learned Word\(learned == 1 ? "" : "s")", "ล้างคำที่จำไว้ (\(learned) คำ)"),
+                          #selector(forgetLearned))
+        forget.isEnabled = learned > 0
+        fix.addItem(forget)
+        menu.addItem(fixItem)
+        if Settings.fixMode != .off {
             let status = autoFix.status
-            let line = NSMenuItem(title: "    " + status, action: nil, keyEquivalent: "")
+            let line = NSMenuItem(title: "    " + status.text, action: nil, keyEquivalent: "")
             line.isEnabled = false
             menu.addItem(line)
-            if status.hasPrefix("Needs") { menu.addItem(item("    Open Privacy Settings…", #selector(openPrivacySettings))) }
-            if status.hasPrefix("Not running") { menu.addItem(item("    Relaunch CursorLingo", #selector(relaunch))) }
+            if status.problem == .permission {
+                menu.addItem(item("    " + tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(openPrivacySettings)))
+            }
+            if status.problem == .notRunning {
+                menu.addItem(item("    " + tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(relaunch)))
+            }
         }
-        menu.addItem(item("Launch at Login", #selector(toggleLogin), on: LoginItem.isEnabled))
+        menu.addItem(item(tr("Remember Language per App", "จำภาษาของแต่ละแอป"), #selector(togglePerAppLanguage),
+                          on: Settings.perAppLanguage))
+        menu.addItem(item(tr("Launch at Login", "เปิดพร้อมเครื่อง"), #selector(toggleLogin), on: LoginItem.isEnabled))
         menu.addItem(.separator())
-        menu.addItem(item("Quit CursorLingo", #selector(quit), key: "q"))
+        // Bilingual on purpose, so it can be found whichever language the menu is in.
+        menu.addItem(submenu("Language / ภาษา", UILanguage.allCases.map { ($0.rawValue, $0.title) },
+                             selected: Settings.uiLanguage.rawValue, #selector(pickUILanguage)))
+        menu.addItem(item(tr("Report a Wrong Fix or Bug…", "แจ้งปัญหาหรือคำที่แก้ผิด…"), #selector(reportIssue)))
+        menu.addItem(item(tr("Quit CursorLingo", "ปิด CursorLingo"), #selector(quit), key: "q"))
     }
 
     private func item(_ title: String, _ action: Selector, on: Bool = false, key: String = "") -> NSMenuItem {
@@ -752,11 +964,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return i
     }
 
-    private func submenu(_ title: String, _ options: [String], selected: String, _ action: Selector) -> NSMenuItem {
+    /// `options` are (stored value, title shown) pairs.
+    private func submenu(_ title: String, _ options: [(String, String)], selected: String, _ action: Selector) -> NSMenuItem {
         let sub = NSMenu()
-        for o in options {
-            let i = item(o, action, on: o == selected)
-            i.representedObject = o
+        for (value, label) in options {
+            let i = item(label, action, on: value == selected)
+            i.representedObject = value
             sub.addItem(i)
         }
         let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
@@ -764,6 +977,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return parent
     }
 
+    @objc private func pickUILanguage(_ s: NSMenuItem) {
+        Settings.uiLanguage = UILanguage(rawValue: s.representedObject as? String ?? "") ?? .system
+    }
     @objc private func pickMode(_ s: NSMenuItem) {
         Settings.mode = DisplayMode(rawValue: s.representedObject as? String ?? "") ?? .always
         refresh(animated: Settings.mode == .onSwitch)
@@ -787,26 +1003,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.hidden = []
         refresh(animated: true)
     }
-    @objc private func toggleAutoFix() {
-        if Settings.autoFix {
+    @objc private func pickFixMode(_ s: NSMenuItem) {
+        let mode = FixMode(rawValue: s.representedObject as? String ?? "") ?? .off
+        guard mode != .off else {
             Settings.autoFix = false
             autoFixRetry?.invalidate()
             autoFix.stop()
             return
         }
+        Settings.fixAsYouType = mode == .automatic
+        autoFix.fixAsYouType = Settings.fixAsYouType
+        if !Settings.autoFix { enableAutoFix() }
+    }
+    private func enableAutoFix() {
         Settings.autoFix = true   // stays on while waiting for permission; the menu shows what is missing
         startAutoFix()
         if autoFix.isRunning { return }
 
         AutoFix.requestPermission()
         let alert = NSAlert()
-        alert.messageText = "Allow keyboard access for Auto-fix"
-        alert.informativeText = "CursorLingo reads each word you type, in memory only, to notice words typed in the wrong "
-            + "language. Turn CursorLingo on under Privacy & Security → Input Monitoring and → Accessibility. "
-            + "Auto-fix starts by itself once both are allowed (if not, choose Relaunch from the menu). "
-            + "Nothing is stored or sent anywhere."
-        alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "Later")
+        alert.messageText = tr("Allow keyboard access to fix the wrong language",
+                               "ขอสิทธิ์เข้าถึงแป้นพิมพ์ เพื่อแก้คำที่พิมพ์ผิดภาษา")
+        alert.informativeText = tr(
+            "CursorLingo reads each word you type, in memory only, to notice words typed in the wrong language. "
+                + "Turn CursorLingo on under Privacy & Security → Input Monitoring and → Accessibility. "
+                + "It starts by itself once both are allowed (if not, choose Relaunch from the menu). "
+                + "Only words you convert with double Shift are remembered, on this Mac; nothing is sent anywhere.",
+            "CursorLingo จะอ่านคำที่คุณพิมพ์ในหน่วยความจำเท่านั้น เพื่อดูว่าคำไหนพิมพ์ผิดภาษา "
+                + "โปรดเปิดสิทธิ์ให้ CursorLingo ใน System Settings → Privacy & Security → Input Monitoring และ Accessibility "
+                + "เมื่ออนุญาตครบแล้วจะเริ่มทำงานเอง (ถ้ายังไม่ทำงาน ให้เลือก “เปิด CursorLingo ใหม่” จากเมนู) "
+                + "คำที่ถูกจำไว้มีเฉพาะคำที่คุณสั่งแก้ด้วย Shift 2 ครั้ง เก็บในเครื่องนี้เท่านั้น และไม่มีการส่งข้อมูลออกไปไหน")
+        alert.addButton(withTitle: tr("Open Settings", "เปิด System Settings"))
+        alert.addButton(withTitle: tr("Later", "ไว้ทีหลัง"))
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn { openPrivacySettings() }
     }
@@ -823,6 +1051,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", Bundle.main.bundlePath]
         try? p.run()
         NSApp.terminate(nil)
+    }
+    @objc private func toggleCodeEditorsManual() {
+        Settings.codeEditorsManual.toggle()
+        autoFix.codeEditorsManual = Settings.codeEditorsManual
+    }
+    @objc private func forgetLearned() { autoFix.forgetRules() }
+    @objc private func togglePerAppLanguage() {
+        Settings.perAppLanguage.toggle()
+        if Settings.perAppLanguage { rememberAppLanguage() }
+    }
+    @objc private func reportIssue() {
+        // Only opens the issue form; nothing typed is ever attached.
+        if let url = URL(string: "https://github.com/kittipongint/cursor-lingo/issues/new/choose") { NSWorkspace.shared.open(url) }
     }
     @objc private func toggleLogin() { LoginItem.set(!LoginItem.isEnabled) }
     @objc private func quit() { NSApp.terminate(nil) }
