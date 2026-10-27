@@ -696,16 +696,21 @@ template <typename F> static void LoadProc(HMODULE dll, const char* name, F& fn)
     fn = reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(dll, name)));
 }
 
+static bool g_magReady = false;  // MagInitialize done, once per run
+
 static bool MakeLens() {
     if (g_magnifier) return true;
-    HMODULE dll = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!dll) return false;
-    BOOL(WINAPI* init)() = nullptr;
-    LoadProc(dll, "MagInitialize", init);
-    LoadProc(dll, "MagSetWindowSource", g_magSetSource);
-    LoadProc(dll, "MagSetWindowTransform", g_magSetTransform);
-    LoadProc(dll, "MagSetWindowFilterList", g_magSetFilter);
-    if (!init || !g_magSetSource || !g_magSetTransform || !g_magSetFilter || !init()) return false;
+    if (!g_magReady) {
+        HMODULE dll = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!dll) return false;
+        BOOL(WINAPI* init)() = nullptr;
+        LoadProc(dll, "MagInitialize", init);
+        LoadProc(dll, "MagSetWindowSource", g_magSetSource);
+        LoadProc(dll, "MagSetWindowTransform", g_magSetTransform);
+        LoadProc(dll, "MagSetWindowFilterList", g_magSetFilter);
+        if (!init || !g_magSetSource || !g_magSetTransform || !g_magSetFilter || !init()) return false;
+        g_magReady = true;
+    }
     g_lens = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                              L"CursorLingoOverlay", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, g_inst, nullptr);
     SetLayeredWindowAttributes(g_lens, 0, 255, LWA_ALPHA);
@@ -822,9 +827,21 @@ static void SetPresentation(bool on) {
     SettingsReload(TAB_PRESENT);
 }
 
+// Zoom off: the magnifier shrinks to one pixel and stops being aimed at the screen until zoom is used again. It is
+// kept rather than destroyed: every new magnifier control (and every MagUninitialize) leaks a handle in Windows,
+// and tearing it all down does not give its runtime's memory back either.
+static void ReleaseLens() {
+    if (!g_magnifier) return;
+    SetWindowPos(g_magnifier, nullptr, 0, 0, 1, 1, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(g_lens, nullptr, 0, 0, 1, 1, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+    g_magSetSource(g_magnifier, RECT{0, 0, 1, 1});
+    g_lensSide = 0;  // MoveLens sizes it again
+}
+
 static void SetZoom(bool on) {
     g_zoom = on && MakeLens();
     UpdateCircle();
+    if (!g_zoom) ReleaseLens();
     SettingsReload(TAB_PRESENT);
 }
 
@@ -867,8 +884,8 @@ static void PenSegment(POINT a, POINT b, RECT* dirty) {
 
 static void SetDrawing(bool on) {
     g_drawing = false;
-    g_penPoints.clear();
-    g_strokeStarts.clear();
+    std::vector<POINT>().swap(g_penPoints);  // give the memory back, not just empty the lists
+    std::vector<size_t>().swap(g_strokeStarts);
     ShowWindow(g_draw, SW_HIDE);
     g_drawImg.Destroy();
     if (on) {
@@ -1223,8 +1240,18 @@ static bool FocusedFieldIsPassword() {
     static const GUID kIidIUIAutomation = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
     static IUIAutomation* uia = nullptr;
     if (FocusIsPassword()) return true;
-    if (!uia && FAILED(CoCreateInstance(kClsidUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIidIUIAutomation, (void**)&uia)))
-        return true;
+    if (!uia) {
+        if (FAILED(CoCreateInstance(kClsidUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIidIUIAutomation, (void**)&uia)))
+            return true;
+        // This runs on the thread of the keyboard and mouse hooks: an app that hangs must not hold it (Windows drops
+        // hooks that stop answering). Past the limit the call fails, which counts as a password field.
+        IUIAutomation2* uia2 = nullptr;
+        if (SUCCEEDED(uia->QueryInterface(__uuidof(IUIAutomation2), (void**)&uia2))) {
+            uia2->put_ConnectionTimeout(250);
+            uia2->put_TransactionTimeout(250);
+            uia2->Release();
+        }
+    }
     IUIAutomationElement* focused = nullptr;
     BOOL password = TRUE;
     if (SUCCEEDED(uia->GetFocusedElement(&focused)) && focused) {
@@ -1537,7 +1564,9 @@ static void CheckSelectionCopy() {
     if (OpenClipboardRetry()) {
         if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
             if (const char16_t* p = (const char16_t*)GlobalLock(h)) {
-                while (p[n] && n < 2001) { in[n] = p[n]; n++; }
+                // Within the block even if an app left out the terminating zero.
+                const SIZE_T units = GlobalSize(h) / sizeof(char16_t);
+                while (n < 2001 && (SIZE_T)n < units && p[n]) { in[n] = p[n]; n++; }
                 GlobalUnlock(h);
             }
         }
@@ -1902,8 +1931,16 @@ static void FillRound(HDC dc, RECT r, float radius, COLORREF fill, COLORREF line
     Bitmap b;
     if (w <= 0 || h <= 0 || !b.Create(w, h)) return;
     const bool hasFill = fill != CLR_NONE, hasLine = line != CLR_NONE;
+    // Pixels further than this from every side are plain fill: only the edge needs the distance worked out.
+    const int m = (int)std::ceil(radius + edge) + 1;
+    const DWORD inside = hasFill ? 0xFF000000 | (DWORD)GetRValue(fill) << 16 | (DWORD)GetGValue(fill) << 8 | GetBValue(fill) : 0;
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
+            if (y >= m && y < h - m && x == m && w - 2 * m > 0) {
+                std::fill(b.px + y * w + m, b.px + y * w + (w - m), inside);
+                x = w - m - 1;
+                continue;
+            }
             const float d = SdRoundRect(x + 0.5f, y + 0.5f, w / 2.0f, h / 2.0f, w / 2.0f, h / 2.0f, radius);
             const float out = Clamp01(0.5f - d), in = !hasLine ? out : hasFill ? Clamp01(0.5f - d - edge) : 0;
             const float a = hasFill ? out : out - Clamp01(0.5f - d - edge), ln = hasFill ? out - in : a;
@@ -3204,6 +3241,7 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 } else {
                     g_zoom = false;
                     SetPresentation(false);
+                    ReleaseLens();
                     SaveSettings();
                 }
             }
