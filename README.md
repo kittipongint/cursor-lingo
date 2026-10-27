@@ -25,19 +25,20 @@
 ## Features
 
 - **Badge at the pointer** shows `EN`, `TH`, `JA`, `ZH`, `KO`… for *any* input language, each in its own color.
-- **4 styles** (Color · Light · Dark · Dot) and **3 sizes**.
+- **4 styles** (Color · Light · Dark · Dot), **3 sizes**, and a thin border you can turn off.
 - **Show mode:** *Always*, or *Only when switching* (pops up for about a second, then fades out).
-- **Hide per language.** For example, show the badge only when you're *not* in English.
+- **Per language:** pick its color, or hide its badge (for example, show the badge only when you're *not* in English). Settings lists only the keyboards you added to your system.
 - **Presentation tools** for screen sharing and recordings. Use them alone or together; every click sends out a ripple in the current language's color.
   - **Spotlight** (⌃⌥H on macOS, Ctrl+Alt+H on Windows), after [cursor-highlight](https://github.com/Hazyzh/cursor-highlight): the screen dims except for a circle around the pointer with a turning rainbow ring. It stays click-through, so you keep working.
   - **Zoom** (⌃⌥Z / Ctrl+Alt+Z): the circle magnifies what is under the pointer. ⌃⌥= and ⌃⌥− (Ctrl+Alt+= / −) zoom in and out, from 1.5× to 8×.
   - **Draw on screen** (⌃⌥D / Ctrl+Alt+D): draw with the mouse; ⌘Z / Ctrl+Z takes back the last stroke. While drawing, clicks go to the pen.
   - Hold ⌃⌥ / Ctrl+Alt and scroll to resize the circle. Esc stops drawing first, then turns everything off.
-  - Change the three tools' shortcuts in **Presentation → Shortcuts…**.
+  - Change the three tools' shortcuts in **Settings → Presentation**.
   - Spotlight and drawing need no permissions, and neither does zoom on Windows. Zoom on macOS needs **Screen Recording**, because it has to see the screen; macOS asks the first time you turn zoom on, and recent versions ask again every so often, as they do for every app that records the screen.
 - **Remember language per app (optional).** Each app gets back the layout you last used in it, e.g. English in your editor and Thai in your chat app.
-- **Launch at login / Start with Windows**, switched on in Settings.
-- **English or Thai menus**, following your system language, or picked under *Language / ภาษา*.
+- **One Settings window** with four tabs: Badge, Fix Wrong Language, Presentation and General. The menu-bar or tray menu keeps the everyday things: the presentation tools and the fix mode.
+- **Open automatically** when you log in, switched on in Settings.
+- **English or Thai**, following your system language, or picked under *Language / ภาษา*.
 - **Click-through.** The badge never steals clicks or focus.
 - **Auto-fix wrong language (optional, off by default).** Typed `l;ylfu;yoouhgik` instead of `สวัสดีวันนี้เรา`, or `ะ้รห` instead of `this`? CursorLingo re-types the word and switches the layout for you. English ⇄ Thai. See [Auto-fix](#auto-fix-wrong-language).
 - **Private.** No network, no telemetry. Keystrokes are only observed if you turn Auto-fix on, and then only the current and the last word are kept in memory, plus the personal word list you teach it with double Shift.
@@ -50,9 +51,16 @@
 | Language source  | `kTISNotifySelectedKeyboardInputSourceChanged` | `GetKeyboardLayout` of focused thread   |
 | Memory           | ~15 MB physical footprint              | ~1–2 MB working set                            |
 | Idle CPU         | 0 % (no wake-ups)                      | ~0 % (one coalesced 200 ms check)              |
-| Settings         | Menu-bar icon                          | Tray icon (shows the current language)         |
+| Settings         | Settings window, from the menu-bar icon | Settings window, from the tray icon           |
 
 The Windows tray icon itself shows the current language code. The badge also hides automatically while a full-screen app or game is in front.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/settings-badge-en-dark.webp">
+    <img src="assets/settings-badge-en-light.webp" width="474" alt="Settings, Badge tab: a live preview of the badge next to the pointer, Show, Style, Size and Border, and a row per keyboard (EN ABC, TH Thai) with its color and a Show badge switch">
+  </picture>
+</p>
 
 ## Install
 
@@ -72,13 +80,16 @@ If your keychain has a *Developer ID Application* certificate, `install.sh` sign
 
 #### Turn on Auto-fix on macOS
 
-1. In the menu-bar menu, open **Fix Wrong Language (EN ⇄ TH)** and choose **Automatic** (or **Double Shift Only**). The line under it shows what is still missing.
-2. **Input Monitoring:** allow CursorLingo when macOS asks, or click **Open Privacy Settings…** in the menu and turn CursorLingo on under **Privacy & Security → Input Monitoring**.
+1. Open **Settings… → Fix Wrong Language** (or the **Fix Wrong Language (EN ⇄ TH)** submenu in the menu bar) and choose **Automatic** (or **Double Shift Only**). The status line under the modes shows what is still missing.
+2. **Input Monitoring:** allow CursorLingo when macOS asks, or click **Open Privacy Settings…** next to the status line and turn CursorLingo on under **Privacy & Security → Input Monitoring**.
 3. **Accessibility:** do the same under **Privacy & Security → Accessibility**. If CursorLingo is not listed, click **+** and choose **Applications → CursorLingo**.
 4. **Quit CursorLingo and open it again.** The app reads these permissions when it starts.
-5. The line under Fix Wrong Language should now say **Active**. Test it: on the English layout type `l;ylfu` and press Space; it becomes **สวัสดี**.
+5. The status line should now say **Active**. Test it: on the English layout type `l;ylfu` and press Space; it becomes **สวัสดี**.
 
-   <img src="assets/menu-autofix.png" width="410" alt="CursorLingo menu with Auto-fix checked and the status line 'Active · double-tap Shift: convert word / selection, or undo'">
+   <picture>
+       <source media="(prefers-color-scheme: dark)" srcset="assets/settings-fix-en-dark.webp">
+       <img src="assets/settings-fix-en-light.webp" width="474" alt="Settings, Fix Wrong Language tab: Automatic selected and the status line 'Active · double-tap Shift: convert word / selection, or undo', with the code editor, learned words and per-app options below">
+     </picture>
 
 You only do this once: updates keep the permissions.
 
@@ -101,7 +112,7 @@ From [Releases](https://github.com/kittipongint/cursor-lingo/releases), pick one
 - **Installer (recommended):** `CursorLingo-Windows-x64-Setup.exe`. Installs for your user only, to `%LOCALAPPDATA%\Programs\CursorLingo` (like VS Code's user installer), adds a Start Menu shortcut, can start CursorLingo with Windows, and appears in **Settings → Apps → Installed apps**, where you can uninstall it. Uninstalling also removes its settings.
 - **Portable:** `CursorLingo-Windows-x64-Portable.zip`. Unzip anywhere (Desktop, USB stick, ...) and run `CursorLingo.exe`. Settings stay in the `CursorLingo.ini` next to it, so the whole folder moves with you. To remove it, quit and delete the folder.
 
-Settings are plain files (`%APPDATA%\CursorLingo` for the installed app, the folder itself for the portable one), and *Start with Windows* is a shortcut in your Startup folder. The only registry entry is the one the installer adds so Windows lists the app under Installed apps; the portable version writes none.
+Settings are plain files (`%APPDATA%\CursorLingo` for the installed app, the folder itself for the portable one), and opening CursorLingo automatically is a shortcut in your Startup folder. The only registry entry is the one the installer adds so Windows lists the app under Installed apps; the portable version writes none.
 
 **SmartScreen warning.** The files are not code-signed, so Windows may show *"Windows protected your PC"* the first time. Either:
 
@@ -139,19 +150,19 @@ x86_64-w64-mingw32-g++ -std=c++17 -Os -municode -mwindows -static windows/Cursor
   ④ select a line + double Shift → converted
 </sub></p>
 
-In the menu, set **Fix Wrong Language (EN ⇄ TH)** to **Automatic**. When you finish a word with Space, and it looks like gibberish in the current layout but like a real word in the other one, CursorLingo erases it, types it again from the same keys, and switches the layout so you can keep going. Long Thai runs typed without spaces are fixed after a few characters.
+In **Settings → Fix Wrong Language** (or the menu), choose **Automatic**. When you finish a word with Space, and it looks like gibberish in the current layout but like a real word in the other one, CursorLingo erases it, types it again from the same keys, and switches the layout so you can keep going. Long Thai runs typed without spaces are fixed after a few characters.
 
-**Choose how much it does.** **Fix Wrong Language (EN ⇄ TH)** is a single menu with three choices:
+**Choose how much it does.** **Fix Wrong Language (EN ⇄ TH)** has three modes:
 
 - **Off**: nothing is watched; only the badge runs.
 - **Double Shift Only**: nothing changes by itself. Words and selections are converted only when you double-tap Shift.
 - **Automatic**: words are fixed as you type, and double Shift still converts or undoes.
 
-In the same menu, **In Code Editors: Double Shift Only** (on by default) applies to Automatic. In VS Code, Cursor, Zed, Xcode, JetBrains IDEs, Sublime Text, Visual Studio and similar editors, variable names and keywords can look like gibberish, so words are only converted when you ask.
+In the same tab, **Code editors: fix only on double Shift** (on by default) applies to Automatic. In VS Code, Cursor, Zed, Xcode, JetBrains IDEs, Sublime Text, Visual Studio and similar editors, variable names and keywords can look like gibberish, so words are only converted when you ask.
 
-**Personal word list.** Every word you convert or undo with double Shift is remembered, on this computer only, so you teach CursorLingo your own words, names and slang. The menu shows how many it has learned and can forget them all. Words typed without double Shift are never saved.
+**Personal word list.** Every word you convert or undo with double Shift is remembered, on this computer only, so you teach CursorLingo your own words, names and slang. The tab shows how many it has learned, and **Forget** clears them. Words typed without double Shift are never saved.
 
-**Remember language per app** (in the menu, off by default) switches to the layout you last used in an app whenever it comes to the front. It needs no special permission and works without Auto-fix.
+**Remember language per app** (in the same tab, off by default) switches to the layout you last used in an app whenever it comes to the front. It needs no special permission and works without Auto-fix.
 
 It keeps working after sleep, closing the lid, locking the screen or switching users: CursorLingo re-arms its keyboard listener and forgets the half-typed word, so nothing stale is "fixed" after you wake the computer.
 
@@ -173,7 +184,7 @@ On a sample of real English and Thai words, correct text was wrongly changed in 
 
 **Privacy and permissions.**
 - Off by default. The keyboard hook / event tap only exists while the option is on.
-- Only the current and the last word are kept, in memory. The one thing saved is your personal word list (words you converted or undid with double Shift), in the app's preferences on this computer; *Forget learned words* clears it. Nothing is logged or sent anywhere.
+- Only the current and the last word are kept, in memory. The one thing saved is your personal word list (words you converted or undid with double Shift), in the app's preferences on this computer; **Forget** in Settings clears it. Nothing is logged or sent anywhere.
 - macOS needs **Input Monitoring** and **Accessibility** (see [Turn on Auto-fix on macOS](#turn-on-auto-fix-on-macos)). Secure input (password fields) and Terminal apps are skipped.
 - Windows needs no special rights, but cannot see windows running as administrator. Classic password boxes and consoles are skipped.
 - Only the stock US-English and Thai (Kedmanee) layouts are supported; other layouts are left alone.
@@ -184,10 +195,19 @@ On a sample of real English and Thai words, correct text was wrongly changed in 
 
 The menu-bar icon shows the current input language, the **Presentation** tools, **Fix Wrong Language (EN ⇄ TH)** and its status, **Settings…** (⌘,) and Quit. **Settings…** has four tabs:
 
-- **Badge:** a live preview of the badge next to the pointer; **Show**, **Style** and **Size**; and one row per keyboard you added in System Settings → Keyboard → Input Sources (no other languages), where you hide the badge for that language or pick its color.
-- **Fix Wrong Language:** the mode, **In code editors, fix only on double Shift**, forget learned words, and **Remember language per app**.
-- **Presentation:** turn Spotlight, Zoom and Draw on Screen on or off, change their shortcuts, and set the circle size and magnification.
-- **General:** **Launch at login**, the menu's **Language / ภาษา**, **Report a Wrong Fix or Bug…** (opens the GitHub issue form; nothing you typed is attached), and the version.
+- **Badge:** a live preview of the badge next to the pointer; **Show**, **Style**, **Size** and **Border**; and one row per keyboard you added in System Settings → Keyboard → Input Sources (no other languages), where you pick its color or hide its badge.
+- **Fix Wrong Language:** the mode and its status, **Code editors: fix only on double Shift**, learned words (**Forget** clears them), and **Remember language per app**.
+- **Presentation:** turn Spotlight, Zoom and Draw on Screen on or off, change their shortcuts, set the circle size and magnification, and a reminder of the keys that work while a tool is on.
+- **General:** **Open at login**, the **Language / ภาษา** of the menu and window, **Report…** (opens the GitHub issue form; nothing you typed is attached), the version, and ways to [support CursorLingo](#support).
+
+The window stays on top of other windows, so you can try a setting out in another app while it's open.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/settings-presentation-en-dark.webp">
+    <img src="assets/settings-presentation-en-light.webp" width="474" alt="Settings, Presentation tab: Spotlight, Zoom and Draw on Screen with their shortcuts and switches, the circle size and magnification sliders, and the keys that work while a tool is on">
+  </picture>
+</p>
 
 ### Windows
 
@@ -196,12 +216,12 @@ Click the tray icon for the current input language, the **Presentation** tools, 
 - **Badge:** the live preview, **Show**, **Style**, **Size** and **Border**, and one row per keyboard added in Windows Settings → Time & language → Language & region, to pick its color or hide its badge.
 - **Fix Wrong Language:** the mode, **Code editors: fix only on double Shift**, forget learned words, and **Remember language per app**.
 - **Presentation:** turn Spotlight, Zoom and Draw on Screen on or off, change their shortcuts, and set the circle size and magnification.
-- **General:** **Open CursorLingo automatically** (the Microsoft Store version opens Windows' Startup apps page instead), the menu's **Language / ภาษา**, **Report…** (opens the GitHub issue form; nothing you typed is attached), and the version.
+- **General:** **Open CursorLingo automatically** (the Microsoft Store version opens Windows' Startup apps page instead), the **Language / ภาษา** of the menu and window, **Report…** (opens the GitHub issue form; nothing you typed is attached), the version, and ways to [support CursorLingo](#support).
 
 ## Uninstall
 
-- **macOS:** `./uninstall.sh`, or quit the app and delete it. Turn off *Launch at Login* first.
-- **Windows:** installed: **Settings → Apps → Installed apps → CursorLingo → Uninstall** (removes its settings too). Portable: untick *Start with Windows*, quit, and delete the folder.
+- **macOS:** `./uninstall.sh`, or quit the app and delete it. Turn off *Open at login* (Settings → General) first.
+- **Windows:** installed: **Settings → Apps → Installed apps → CursorLingo → Uninstall** (removes its settings too). Portable: turn off *Open CursorLingo automatically* (Settings → General), quit, and delete the folder.
 
 ## Project layout
 
