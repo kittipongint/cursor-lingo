@@ -1607,7 +1607,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             radio.tag = i
             radio.state = m == mode ? .on : .off
             let detailText = caption(detail)
-            detailText.textColor = .secondaryLabelColor
+            detailText.preferredMaxLayoutWidth = 450  // indented under the radio
             let item = NSStackView(views: [radio, indented(detailText)])
             item.orientation = .vertical
             item.alignment = .leading
@@ -1770,7 +1770,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
                                + "share with friends means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
                                "CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ "
                                + "ฝากกดดาวบน GitHub หรือแชร์ให้เพื่อนๆ หน่อยนะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"))
-        pitch.textColor = .secondaryLabelColor
         let support = NSStackView(views: [
             header(tr("Support CursorLingo", "สนับสนุน CursorLingo")),
             pitch,
@@ -1968,7 +1967,6 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     /// A setting as a row: title and explanation on the left, its control on the right.
     private func optionRow(_ title: String, _ detail: String, _ control: NSView, detailWidth: CGFloat = 370) -> NSView {
         let detailText = caption(detail)
-        detailText.textColor = .secondaryLabelColor
         detailText.preferredMaxLayoutWidth = detailWidth
         let text = NSStackView(views: [label(title), detailText])
         text.orientation = .vertical
@@ -2013,11 +2011,16 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         return s
     }
 
+    /// Explanations: a grey clearly softer than the titles, in light and dark mode.
+    private static let captionColor = NSColor(name: nil) { look in
+        look.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.6, alpha: 1) : NSColor(white: 0.45, alpha: 1)
+    }
+
     /// A quiet one-liner under a heading.
     private func caption(_ text: String) -> NSTextField {
         let l = NSTextField(wrappingLabelWithString: text)
-        l.textColor = .tertiaryLabelColor
-        l.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        l.textColor = Self.captionColor
+        l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         l.preferredMaxLayoutWidth = 470
         return l
     }
