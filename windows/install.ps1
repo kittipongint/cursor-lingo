@@ -3,9 +3,10 @@
 
     .\install.ps1               copy to %LOCALAPPDATA%\Programs\CursorLingo, add a Start Menu shortcut, launch
     .\install.ps1 -Startup      ...and start it with Windows
-    .\install.ps1 -Uninstall    remove everything this script created (settings stay in HKCU\Software\CursorLingo)
+    .\install.ps1 -Uninstall    remove everything this script created (settings stay in %APPDATA%\CursorLingo)
 
   CursorLingo.exe is also fully portable: you can skip this script and run the exe from any folder.
+  Nothing here writes to the registry: "start with Windows" is a shortcut in your Startup folder.
 #>
 param(
     [switch]$Startup,
@@ -17,14 +18,21 @@ $name    = 'CursorLingo'
 $dest    = Join-Path $env:LOCALAPPDATA "Programs\$name"
 $exe     = Join-Path $dest "$name.exe"
 $link    = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\$name.lnk"
-$runKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$startup = Join-Path ([Environment]::GetFolderPath('Startup')) "$name.lnk"
+
+function New-Shortcut($path) {
+    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($path)
+    $sc.TargetPath = $exe
+    $sc.WorkingDirectory = $dest
+    $sc.Description = 'Shows the keyboard input language next to the mouse pointer'
+    $sc.Save()
+}
 
 Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
 
 if ($Uninstall) {
-    Remove-Item $link -Force -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
+    Remove-Item $link, $startup -Force -ErrorAction SilentlyContinue
     Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host "$name removed."
     return
@@ -37,17 +45,8 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Copy-Item $src $exe -Force
 Unblock-File $exe   # drop the "downloaded from the internet" mark so SmartScreen stays quiet
 
-$shell = New-Object -ComObject WScript.Shell
-$sc = $shell.CreateShortcut($link)
-$sc.TargetPath = $exe
-$sc.WorkingDirectory = $dest
-$sc.Description = 'Shows the keyboard input language next to the mouse pointer'
-$sc.Save()
-
-if ($Startup) {
-    New-Item -Path $runKey -Force | Out-Null
-    Set-ItemProperty -Path $runKey -Name $name -Value "`"$exe`""
-}
+New-Shortcut $link
+if ($Startup) { New-Shortcut $startup }
 
 Start-Process $exe
 Write-Host "Installed to $dest"

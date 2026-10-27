@@ -68,9 +68,27 @@ jobs:
       - uses: actions/checkout@v4
       - run: cmake -S windows -B build/windows -A x64
       - run: cmake --build build/windows --config Release
-      - run: Compress-Archive -Path build/windows/Release/CursorLingo.exe, windows/install.ps1 -DestinationPath build/CursorLingo-Windows-x64.zip
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          # A CursorLingo.ini next to the exe makes it keep its settings there (portable mode).
+          New-Item -ItemType Directory -Force build/portable | Out-Null
+          Copy-Item build/windows/Release/CursorLingo.exe build/portable/
+          [IO.File]::WriteAllText("$PWD/build/portable/CursorLingo.ini", "", [Text.Encoding]::Unicode)
+          Compress-Archive -Path build/portable/* -DestinationPath build/CursorLingo-Windows-x64-Portable.zip
+      - name: Per-user installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc windows/CursorLingo.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
-        with: { name: CursorLingo-Windows, path: build/CursorLingo-Windows-x64.zip }
+        with:
+          name: CursorLingo-Windows
+          path: |
+            build/CursorLingo-Windows-x64-Setup.exe
+            build/CursorLingo-Windows-x64-Portable.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
