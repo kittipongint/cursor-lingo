@@ -10,6 +10,7 @@
 
 import AppKit
 import Carbon
+import ScreenCaptureKit
 import ServiceManagement
 
 // MARK: - Menu language
@@ -104,6 +105,21 @@ struct Settings {
     static var uiLanguage: UILanguage {
         get { UILanguage(rawValue: d.string(forKey: "uiLanguage") ?? "") ?? .system }
         set { d.set(newValue.rawValue, forKey: "uiLanguage") }
+    }
+    /// Presentation spotlight: the screen dimmed except around the pointer. Off by default.
+    static var presentation: Bool {
+        get { d.bool(forKey: "presentation") }
+        set { d.set(newValue, forKey: "presentation") }
+    }
+    /// Radius of the presentation spotlight, in points.
+    static var spotlightRadius: Double {
+        get { d.object(forKey: "spotlightRadius") as? Double ?? 100 }
+        set { d.set(newValue, forKey: "spotlightRadius") }
+    }
+    /// Magnification of the presentation zoom lens.
+    static var zoomLevel: Double {
+        get { d.object(forKey: "zoomLevel") as? Double ?? 2 }
+        set { d.set(newValue, forKey: "zoomLevel") }
     }
     /// Bundle ID -> input source ID it was last used with (for perAppLanguage).
     static var appLanguages: [String: String] {
@@ -647,6 +663,490 @@ final class AutoFix {
     }
 }
 
+// MARK: - Presentation mode
+
+/// Tools for screen sharing and recordings. Each can be used alone or together:
+///   * Spotlight (after Hazyzh/cursor-highlight): the screen is dimmed except for a circle around the pointer,
+///     ringed by a slowly turning rainbow. It stays click-through, so you keep working underneath.
+///   * Zoom: the circle shows what is under the pointer, magnified. The only tool that needs a permission
+///     (Screen Recording, asked for the first time it is turned on), since it has to see the screen.
+///   * Draw: pen strokes over everything until you leave; while drawing, clicks go to the pen.
+/// Every click sends out a ripple in the current language's colour. ⌃⌥ + scroll resizes the circle, ⌃⌥ = / −
+/// zoom in and out, ⌘Z takes back the last stroke, Esc leaves drawing first, then everything else.
+final class Presenter {
+    static let minRadius: CGFloat = 40, maxRadius: CGFloat = 300
+    static let minZoom: CGFloat = 1.5, maxZoom: CGFloat = 8
+    private static let dimColor = NSColor(srgbRed: 0.27, green: 0.34, blue: 0.38, alpha: 0.6).cgColor
+    private static let rainbow: [CGColor] = [
+        NSColor.cyan, NSColor(srgbRed: 0.70, green: 1, blue: 0.53, alpha: 1), NSColor(srgbRed: 0.91, green: 1, blue: 0.31, alpha: 1),
+        NSColor(srgbRed: 1, green: 0.31, blue: 0.31, alpha: 1), NSColor(srgbRed: 0.04, green: 0.96, blue: 0.48, alpha: 1),
+        NSColor.white, NSColor.cyan,
+    ].map(\.cgColor)
+    private static let rippleRadius: CGFloat = 36
+    /// Zoom is built on ScreenCaptureKit, which arrived in macOS 12.3.
+    static var zoomAvailable: Bool { if #available(macOS 12.3, *) { return true } else { return false } }
+
+    private var dims: [(panel: NSPanel, mask: CAShapeLayer)] = []
+    private let ringPanel: NSPanel
+    private let gradient = CAGradientLayer()
+    private let ringShape = CAShapeLayer()
+    private let lens = CALayer()
+    private var stopFeed: (() -> Void)?     // stops the ScreenFeed, while zoomed in
+    private var feedScreen = NSRect.zero    // the screen being captured, in global coordinates
+    private var sketches: [NSPanel] = []
+    private var strokes: [CALayer] = []
+    private var ripples: [(panel: NSPanel, layer: CAShapeLayer)] = []
+    private var nextRipple = 0
+    private var keys: [HotKey] = []         // Esc and friends, registered only while something is on
+    private var pointer = NSPoint.zero
+    private(set) var spotlight = false, zoom = false, drawing = false
+    /// Zoom was asked for but Screen Recording isn't allowed yet.
+    private(set) var zoomBlocked = false
+    var isOn: Bool { spotlight || zoom }
+    /// Called whenever a tool goes on or off, including from a shortcut.
+    var onChange: (() -> Void)?
+
+    var radius: CGFloat = 100 {
+        didSet {
+            radius = min(max(radius, Presenter.minRadius), Presenter.maxRadius)
+            if radius != oldValue { layoutRing(); rebuildMasks() }
+        }
+    }
+    var zoomLevel: CGFloat = 2 {
+        didSet { zoomLevel = min(max(zoomLevel, Presenter.minZoom), Presenter.maxZoom); aimLens() }
+    }
+    var color: NSColor = .systemGreen {
+        didSet { for r in ripples { r.layer.strokeColor = color.cgColor } }
+    }
+
+    init() {
+        let side = 2 * (Presenter.maxRadius + 16)
+        ringPanel = Presenter.makePanel(frame: NSRect(x: 0, y: 0, width: side, height: side))
+        lens.masksToBounds = true
+        lens.contentsGravity = .resize
+        lens.backgroundColor = NSColor.black.cgColor
+        lens.isHidden = true
+        ringPanel.contentView?.layer?.addSublayer(lens)
+        gradient.type = .conic
+        gradient.colors = Presenter.rainbow
+        gradient.startPoint = CGPoint(x: 0.5, y: 0.5)
+        gradient.endPoint = CGPoint(x: 0.5, y: 1)
+        gradient.opacity = 0.85
+        ringShape.fillColor = nil
+        ringShape.strokeColor = NSColor.black.cgColor
+        gradient.mask = ringShape
+        ringPanel.contentView?.layer?.addSublayer(gradient)
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = -2 * CGFloat.pi
+        spin.duration = 6
+        spin.repeatCount = .infinity
+        gradient.add(spin, forKey: "spin")
+        gradient.speed = 0  // paused until shown
+
+        for _ in 0..<3 {
+            let side = 2 * (Presenter.rippleRadius + 4)
+            let panel = Presenter.makePanel(frame: NSRect(x: 0, y: 0, width: side, height: side))
+            let layer = CAShapeLayer()
+            layer.frame = CGRect(x: 0, y: 0, width: side, height: side)
+            layer.path = CGPath(ellipseIn: layer.frame.insetBy(dx: 4, dy: 4), transform: nil)
+            layer.fillColor = nil
+            layer.lineWidth = 4
+            layer.opacity = 0
+            panel.contentView?.layer?.addSublayer(layer)
+            ripples.append((panel, layer))
+        }
+        color = .systemGreen
+        layoutRing()
+    }
+
+    private static func makePanel(frame: NSRect, level: CGWindowLevelKey = .assistiveTechHighWindow) -> NSPanel {
+        let panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.animationBehavior = .none
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(level)))
+        panel.contentView?.wantsLayer = true
+        return panel
+    }
+
+    /// The rainbow ring sits just outside the clear circle, its width growing a little with the radius.
+    private func layoutRing() {
+        let side = ringPanel.frame.width, width = max(radius / 30, 3)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = CGRect(x: 0, y: 0, width: side, height: side)
+        ringShape.frame = gradient.bounds
+        let r = radius + width / 2 - 1  // overlaps the edge of the hole by a pixel
+        ringShape.path = CGPath(ellipseIn: CGRect(x: side / 2 - r, y: side / 2 - r, width: 2 * r, height: 2 * r), transform: nil)
+        ringShape.lineWidth = width
+        lens.frame = CGRect(x: side / 2 - radius, y: side / 2 - radius, width: 2 * radius, height: 2 * radius)
+        lens.cornerRadius = radius
+        CATransaction.commit()
+        aimLens()
+    }
+
+    /// One dimming panel per screen. Its mask is a big rectangle with a round hole in the middle; following the
+    /// pointer only moves the mask, so nothing is redrawn.
+    private func rebuildDims() {
+        for d in dims { d.panel.orderOut(nil) }
+        dims = NSScreen.screens.map { screen in
+            let panel = Presenter.makePanel(frame: screen.frame, level: .screenSaverWindow)
+            let dim = CALayer()
+            dim.frame = CGRect(origin: .zero, size: screen.frame.size)
+            dim.backgroundColor = Presenter.dimColor
+            let mask = CAShapeLayer()
+            mask.fillRule = .evenOdd
+            dim.mask = mask
+            panel.contentView?.layer?.addSublayer(dim)
+            return (panel, mask)
+        }
+        rebuildMasks()
+    }
+
+    private func rebuildMasks() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for d in dims {
+            let size = d.panel.frame.size, w = 4 * size.width, h = 4 * size.height
+            d.mask.bounds = CGRect(x: 0, y: 0, width: w, height: h)
+            let path = CGMutablePath()
+            path.addRect(d.mask.bounds)
+            path.addEllipse(in: CGRect(x: w / 2 - radius, y: h / 2 - radius, width: 2 * radius, height: 2 * radius))
+            d.mask.path = path
+        }
+        CATransaction.commit()
+        follow(pointer)
+    }
+
+    func screensChanged() {
+        if spotlight { rebuildDims(); for d in dims { d.panel.orderFrontRegardless() } }
+        if drawing { setDrawing(false); setDrawing(true) }
+        feedScreen = .zero  // capture again, at the new size
+        if zoom { follow(pointer) }
+    }
+
+    func setSpotlight(_ on: Bool) {
+        spotlight = on
+        if on {
+            rebuildDims()
+            for d in dims { d.panel.orderFrontRegardless() }
+        } else {
+            for d in dims { d.panel.orderOut(nil) }
+            dims = []
+        }
+        update()
+    }
+
+    func setZoom(_ on: Bool) {
+        zoom = false
+        stopFeed?()
+        stopFeed = nil
+        feedScreen = .zero
+        if on, #available(macOS 12.3, *) {
+            if CGPreflightScreenCaptureAccess() {
+                zoom = true
+                zoomBlocked = false
+            } else {
+                zoomBlocked = true
+                CGRequestScreenCaptureAccess()  // macOS asks once; after that, the menu links to the setting
+            }
+        }
+        lens.contents = nil
+        update()
+        follow(NSEvent.mouseLocation)
+    }
+
+    /// Full-screen panels that take the mouse while drawing, just under the ring and the badge.
+    func setDrawing(_ on: Bool) {
+        drawing = on
+        for p in sketches { p.orderOut(nil) }
+        sketches = []
+        strokes = []
+        if on {
+            for screen in NSScreen.screens {
+                let panel = Presenter.makePanel(frame: screen.frame)
+                panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.screenSaverWindow)) + 1)
+                panel.ignoresMouseEvents = false  // every click on it is a pen stroke, transparent or not
+                let view = SketchView(frame: NSRect(origin: .zero, size: screen.frame.size))
+                view.onStroke = { [weak self] in self?.strokes.append($0) }
+                panel.contentView = view
+                panel.orderFrontRegardless()
+                sketches.append(panel)
+            }
+        } else {
+            NSCursor.arrow.set()
+        }
+        update()
+    }
+
+    func undoStroke() { strokes.popLast()?.removeFromSuperlayer() }
+
+    /// Shows what is on, and registers the shortcuts that only make sense while it is.
+    private func update() {
+        if isOn {
+            ringPanel.orderFrontRegardless()
+            gradient.speed = 1
+        } else {
+            gradient.speed = 0
+            ringPanel.orderOut(nil)
+        }
+        lens.isHidden = !zoom
+        // Hot keys run their action from inside the Carbon handler; changing them there is left to the next turn.
+        let later: (@escaping () -> Void) -> () -> Void = { action in { DispatchQueue.main.async(execute: action) } }
+        self.keys = []  // a key can't be registered twice: let the old ones go first
+        var keys: [HotKey] = []
+        if isOn || drawing {
+            keys.append(HotKey(keyCode: kVK_Escape, modifiers: 0, action: later { [weak self] in self?.escape() }))
+        }
+        if zoom {
+            keys.append(HotKey(keyCode: kVK_ANSI_Equal, modifiers: controlKey | optionKey,
+                               action: later { [weak self] in self?.stepZoom(1.25) }))
+            keys.append(HotKey(keyCode: kVK_ANSI_Minus, modifiers: controlKey | optionKey,
+                               action: later { [weak self] in self?.stepZoom(0.8) }))
+        }
+        if drawing {
+            keys.append(HotKey(keyCode: kVK_ANSI_Z, modifiers: cmdKey, action: later { [weak self] in self?.undoStroke() }))
+        }
+        self.keys = keys
+        follow(pointer)
+        onChange?()
+    }
+
+    private func escape() {
+        if drawing { setDrawing(false); return }  // first Esc puts the pen down, the next one leaves
+        if zoom { setZoom(false) }
+        if spotlight { setSpotlight(false) }
+    }
+
+    private func stepZoom(_ factor: CGFloat) {
+        zoomLevel *= factor
+        Settings.zoomLevel = Double(zoomLevel)
+    }
+
+    func follow(_ p: NSPoint) {
+        pointer = p
+        guard isOn else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for d in dims {
+            let f = d.panel.frame, margin = radius + 8
+            // Off this screen: keep the hole just outside it, so the mask still covers the whole screen.
+            let x = min(max(p.x - f.minX, -margin), f.width + margin)
+            let y = min(max(p.y - f.minY, -margin), f.height + margin)
+            d.mask.position = CGPoint(x: x, y: y)
+        }
+        CATransaction.commit()
+        let half = ringPanel.frame.width / 2
+        ringPanel.setFrameOrigin(NSPoint(x: (p.x - half).rounded(), y: (p.y - half).rounded()))
+        if zoom {
+            if !feedScreen.contains(p) { capture(screenAt: p) }
+            aimLens()
+        }
+    }
+
+    /// Streams the screen under the pointer (without CursorLingo's own windows) into the lens.
+    private func capture(screenAt p: NSPoint) {
+        guard #available(macOS 12.3, *),
+              let screen = NSScreen.screens.first(where: { $0.frame.contains(p) }),
+              let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return }
+        feedScreen = screen.frame
+        let feed = ScreenFeed()
+        feed.onFrame = { [weak self] surface in self?.lens.contents = surface }
+        feed.onStop = { [weak self] in if self?.zoom == true { self?.setZoom(false) } }
+        feed.start(display: id, scale: screen.backingScaleFactor)
+        stopFeed?()
+        stopFeed = { feed.stop() }
+    }
+
+    /// Points the lens at the circle around the pointer, `zoomLevel` times smaller than the lens itself.
+    private func aimLens() {
+        let f = feedScreen
+        guard zoom, f.width > 0 else { return }
+        let half = radius / zoomLevel
+        let x = min(max(pointer.x - f.minX, half), f.width - half)   // near an edge, stay on the screen
+        let y = min(max(pointer.y - f.minY, half), f.height - half)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        lens.contentsRect = CGRect(x: (x - half) / f.width, y: (y - half) / f.height,
+                                   width: 2 * half / f.width, height: 2 * half / f.height)
+        CATransaction.commit()
+    }
+
+    func click(at p: NSPoint) {
+        guard isOn, !drawing else { return }
+        let (panel, layer) = ripples[nextRipple]
+        nextRipple = (nextRipple + 1) % ripples.count
+        let half = panel.frame.width / 2
+        panel.setFrameOrigin(NSPoint(x: (p.x - half).rounded(), y: (p.y - half).rounded()))
+        panel.orderFrontRegardless()
+
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 0.25
+        grow.toValue = 1
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1.0
+        fade.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [grow, fade]
+        group.duration = 0.4
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak panel] in panel?.orderOut(nil) }
+        layer.removeAllAnimations()
+        layer.add(group, forKey: "ripple")
+        CATransaction.commit()
+    }
+}
+
+/// The pen: each drag becomes a stroke layer.
+final class SketchView: NSView {
+    var onStroke: ((CALayer) -> Void)?
+    private var stroke: CAShapeLayer?
+    private var path = CGMutablePath()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .inVisibleRect, .cursorUpdate, .mouseMoved],
+                                       owner: self))
+    }
+    required init?(coder: NSCoder) { nil }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func cursorUpdate(with event: NSEvent) { NSCursor.crosshair.set() }
+    override func mouseMoved(with event: NSEvent) { NSCursor.crosshair.set() }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        path = CGMutablePath()
+        path.move(to: p)
+        path.addLine(to: p)  // a click leaves a dot
+        let s = CAShapeLayer()
+        s.frame = bounds
+        s.fillColor = nil
+        s.strokeColor = NSColor.systemRed.cgColor
+        s.lineWidth = 5
+        s.lineCap = .round
+        s.lineJoin = .round
+        s.path = path
+        layer?.addSublayer(s)
+        stroke = s
+        onStroke?(s)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let stroke else { return }
+        path.addLine(to: convert(event.locationInWindow, from: nil))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        stroke.path = path
+        CATransaction.commit()
+    }
+
+    override func mouseUp(with event: NSEvent) { stroke = nil }
+}
+
+/// A live stream of one display, minus CursorLingo's own windows, handed over as IOSurfaces on the main thread.
+@available(macOS 12.3, *)
+final class ScreenFeed: NSObject, SCStreamOutput, SCStreamDelegate {
+    var onFrame: ((IOSurface) -> Void)?
+    var onStop: (() -> Void)?
+    private var stream: SCStream?
+    private let queue = DispatchQueue(label: "io.github.cursorlingo.zoom")
+    private var stopped = false
+
+    func start(display id: CGDirectDisplayID, scale: CGFloat) {
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, _ in
+            DispatchQueue.main.async {
+                guard let self, !self.stopped, let content,
+                      let display = content.displays.first(where: { $0.displayID == id }) else { self?.onStop?(); return }
+                let me = content.applications.filter { $0.processID == getpid() }
+                let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+                let config = SCStreamConfiguration()
+                config.width = Int(CGFloat(display.width) * scale)
+                config.height = Int(CGFloat(display.height) * scale)
+                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                config.pixelFormat = kCVPixelFormatType_32BGRA
+                config.showsCursor = false  // the real pointer is drawn on top anyway
+                config.queueDepth = 4
+                let stream = SCStream(filter: filter, configuration: config, delegate: self)
+                do {
+                    try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
+                } catch {
+                    self.onStop?()
+                    return
+                }
+                stream.startCapture { error in if error != nil { DispatchQueue.main.async { self.onStop?() } } }
+                self.stream = stream
+            }
+        }
+    }
+
+    /// The stream holds on to its output, so it has to be stopped explicitly.
+    func stop() {
+        stopped = true
+        onFrame = nil
+        onStop = nil
+        stream?.stopCapture(completionHandler: nil)
+        stream = nil
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen,
+              let info = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let status = info.first?[.status] as? Int, status == SCFrameStatus.complete.rawValue,
+              let buffer = sampleBuffer.imageBuffer,
+              let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
+        let frame = surface as IOSurface
+        DispatchQueue.main.async { [weak self] in self?.onFrame?(frame) }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        DispatchQueue.main.async { [weak self] in self?.onStop?() }
+    }
+}
+
+/// A system-wide shortcut through Carbon's hot key API, which needs no permission (unlike watching keys).
+final class HotKey {
+    private static var nextID: UInt32 = 1
+    private let id: UInt32
+    private var ref: EventHotKeyRef?
+    private var handler: EventHandlerRef?
+    private let action: () -> Void
+
+    init(keyCode: Int, modifiers: Int, action: @escaping () -> Void) {
+        self.action = action
+        id = HotKey.nextID
+        HotKey.nextID += 1
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        // Every handler sees every hot key of the app: act only on our own.
+        let callback: EventHandlerUPP = { _, event, userData in
+            guard let event, let userData else { return OSStatus(eventNotHandledErr) }
+            var pressed = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &pressed)
+            let me = Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue()
+            guard pressed.id == me.id else { return OSStatus(eventNotHandledErr) }
+            me.action()
+            return noErr
+        }
+        InstallEventHandler(GetApplicationEventTarget(), callback, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), &handler)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x434C_4750), id: id)  // "CLGP"
+        RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), hotKeyID, GetApplicationEventTarget(), 0, &ref)
+    }
+
+    deinit {
+        if let ref { UnregisterEventHotKey(ref) }
+        if let handler { RemoveEventHandler(handler) }
+    }
+}
+
 // MARK: - Launch at login
 
 enum LoginItem {
@@ -699,11 +1199,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var visible = false
     private let autoFix = AutoFix()
     private var autoFixRetry: Timer?
+    private let presenter = Presenter()
+    private var presentationKeys: [HotKey] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildPanel()
         buildStatusItem()
         cacheScreens()
+
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] _ in
+            self?.presenter.click(at: NSEvent.mouseLocation)
+        }) {
+            monitors.append(m)
+        }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: clicks, handler: { [weak self] e in
+            self?.presenter.click(at: NSEvent.mouseLocation)
+            return e
+        }) {
+            monitors.append(m)
+        }
+        // In presentation mode, ⌃⌥ + scroll resizes the spotlight (the scroll still reaches the app underneath).
+        let resize: (NSEvent) -> Void = { [weak self] e in
+            guard let self, self.presenter.isOn, e.modifierFlags.contains([.control, .option]) else { return }
+            self.presenter.radius -= e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 1 : 8)
+            Settings.spotlightRadius = Double(self.presenter.radius)
+        }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel, handler: resize) { monitors.append(m) }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel, handler: { resize($0); return $0 }) {
+            monitors.append(m)
+        }
+        presenter.radius = CGFloat(Settings.spotlightRadius)
+        presenter.zoomLevel = CGFloat(Settings.zoomLevel)
+        presenter.onChange = { [weak self] in
+            guard let self else { return }
+            Settings.presentation = self.presenter.spotlight
+        }
+        // ⌃⌥H spotlight, ⌃⌥Z zoom, ⌃⌥D draw: on and off from anywhere.
+        presentationKeys = [
+            HotKey(keyCode: kVK_ANSI_H, modifiers: controlKey | optionKey) { [weak self] in self?.toggleSpotlight() },
+            HotKey(keyCode: kVK_ANSI_Z, modifiers: controlKey | optionKey) { [weak self] in self?.toggleZoom() },
+            HotKey(keyCode: kVK_ANSI_D, modifiers: controlKey | optionKey) { [weak self] in self?.toggleDrawing() },
+        ]
 
         let mouseEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         if let m = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents, handler: { [weak self] _ in self?.follow() }) {
@@ -736,6 +1273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoFix.codeEditorsManual = Settings.codeEditorsManual
         autoFix.loadRules()
         refresh(animated: false)
+        presenter.setSpotlight(Settings.presentation)
         startAutoFix()   // never prompts at launch; see enableAutoFix()
     }
 
@@ -803,12 +1341,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func cacheScreens() {
         screenFrames = NSScreen.screens.map(\.frame)
+        presenter.screensChanged()
     }
 
     /// Repositions the badge under the pointer. Called for every mouse event, so it stays allocation-free.
     private func follow() {
-        guard visible else { return }
         let p = NSEvent.mouseLocation
+        presenter.follow(p)
+        guard visible else { return }
         var frame = screenFrames.first(where: { $0.contains(p) }) ?? screenFrames.first ?? .zero
         if frame == .zero { frame = NSRect(x: -1e5, y: -1e5, width: 2e5, height: 2e5) }
 
@@ -837,6 +1377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             panel.setContentSize(size)
         }
         statusItem.button?.title = " " + code
+        presenter.color = Palette.color(for: code)
         hideWork?.cancel()
 
         let wanted = !Settings.hidden.contains(code)
@@ -918,6 +1459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                              selected: Settings.style.rawValue, #selector(pickStyle)))
         menu.addItem(submenu(tr("Size", "ขนาด"), BadgeSize.allCases.map { ($0.rawValue, $0.title) },
                              selected: Settings.size.rawValue, #selector(pickSize)))
+        menu.addItem(presentationMenu())
         menu.addItem(.separator())
         // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic.
         let fixItem = submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
@@ -1059,6 +1601,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoFix.codeEditorsManual = Settings.codeEditorsManual
     }
     @objc private func forgetLearned() { autoFix.forgetRules() }
+    @objc private func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
+    @objc private func toggleZoom() { presenter.setZoom(!presenter.zoom) }
+    @objc private func toggleDrawing() { presenter.setDrawing(!presenter.drawing) }
+    @objc private func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Spotlight, Zoom and Draw, with their shortcuts (shown as hints; they work anywhere).
+    private func presentationMenu() -> NSMenuItem {
+        let sub = NSMenu()
+        let tools: [(String, Selector, Bool, String)] = [
+            (tr("Spotlight", "สปอตไลต์"), #selector(toggleSpotlight), presenter.spotlight, "h"),
+            (tr("Zoom", "ซูม"), #selector(toggleZoom), presenter.zoom, "z"),
+            (tr("Draw on Screen", "วาดบนจอ"), #selector(toggleDrawing), presenter.drawing, "d"),
+        ]
+        for (title, action, on, key) in tools {
+            let i = item(title, action, on: on, key: key)
+            i.keyEquivalentModifierMask = [.control, .option]
+            sub.addItem(i)
+        }
+        sub.autoenablesItems = false
+        sub.items[1].isEnabled = Presenter.zoomAvailable
+        if presenter.zoomBlocked && !CGPreflightScreenCaptureAccess() {
+            let line = NSMenuItem(title: "    " + tr("Zoom needs Screen Recording permission",
+                                                    "ซูมต้องได้รับสิทธิ์ Screen Recording ก่อน"), action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            sub.addItem(line)
+            sub.addItem(item("    " + tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(openScreenRecordingSettings)))
+        }
+        sub.addItem(.separator())
+        for hint in [tr("⌃⌥ + Scroll: Resize the Circle", "⌃⌥ + เลื่อนล้อเมาส์: ปรับขนาดวง"),
+                     tr("⌃⌥ = / −: Zoom In / Out", "⌃⌥ = / −: ซูมเข้า / ออก"),
+                     tr("⌘Z: Undo Last Stroke", "⌘Z: ลบเส้นล่าสุด"),
+                     tr("Esc: Stop Drawing, Then Exit", "Esc: เลิกวาด กดอีกครั้งเพื่อออก")] {
+            let i = NSMenuItem(title: hint, action: nil, keyEquivalent: "")
+            i.isEnabled = false
+            sub.addItem(i)
+        }
+        let top = NSMenuItem(title: tr("Presentation", "นำเสนอ"), action: nil, keyEquivalent: "")
+        top.state = presenter.isOn || presenter.drawing ? .on : .off
+        top.submenu = sub
+        return top
+    }
     @objc private func togglePerAppLanguage() {
         Settings.perAppLanguage.toggle()
         if Settings.perAppLanguage { rememberAppLanguage() }

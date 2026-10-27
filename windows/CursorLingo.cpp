@@ -32,6 +32,7 @@
 #include <cmath>
 #include <cwchar>
 #include <cwctype>
+#include <vector>
 
 #include "resource.h"
 #include "../core/layoutfix.h"
@@ -65,6 +66,9 @@ struct Settings {
     DWORD codeEditorsManual = 1;  // code editors: double Shift only
     DWORD perAppLanguage = 0;   // switch to the layout each app was last used with
     DWORD uiLang = 0;           // menu language: 0 = Windows display language, 1 = English, 2 = Thai
+    DWORD presentation = 0;     // spotlight around the pointer + click ripples
+    DWORD spotRadius = 100;     // spotlight radius in points (40..300)
+    DWORD zoomLevel = 20;       // zoom lens magnification, in tenths (15..80)
     wchar_t hidden[256] = L"";  // comma separated codes, e.g. ",EN,JA,"
 } g_set;
 
@@ -92,6 +96,9 @@ static const SettingField kFields[] = {
     {L"CodeEditorsManual", &g_set.codeEditorsManual, 1, 2},
     {L"PerAppLanguage", &g_set.perAppLanguage, 0, 2},
     {L"UILanguage", &g_set.uiLang, 0, 3},
+    {L"Presentation", &g_set.presentation, 0, 2},
+    {L"SpotlightRadius", &g_set.spotRadius, 100, 301},
+    {L"ZoomLevel", &g_set.zoomLevel, 20, 81},
 };
 
 static void FindSettingsFiles() {
@@ -452,9 +459,14 @@ static void RenderBadge(Bitmap& out, const wchar_t* code, int style, int bw, int
 #define WM_APP_FIX (WM_APP + 3)
 #define WM_APP_SELECTION (WM_APP + 4)
 #define WM_APP_LEARN (WM_APP + 5)
-enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5 };
+#define WM_APP_RIPPLE (WM_APP + 6)
+#define WM_APP_SPOT_SIZE (WM_APP + 7)
+enum { TIMER_POLL = 1, TIMER_HIDE = 2, TIMER_FADE = 3, TIMER_COPY = 4, TIMER_RESTORE = 5, TIMER_RIPPLE = 6, TIMER_SPIN = 7, TIMER_SAVE = 8,
+       TIMER_LENS = 9 };
+enum { HOTKEY_PRESENTATION = 1, HOTKEY_ESCAPE, HOTKEY_ZOOM, HOTKEY_DRAW, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO };
 enum {
     ID_HIDE_CURRENT = 100, ID_SHOW_ALL, ID_STARTUP, ID_QUIT, ID_CODE_EDITORS, ID_REPORT, ID_FORGET_WORDS, ID_PER_APP,
+    ID_PRESENTATION, ID_ZOOM, ID_DRAW,
     ID_FIX_BASE = 150, ID_UILANG_BASE = 160,
     ID_STYLE_BASE = 200, ID_MODE_BASE = 300, ID_SIZE_BASE = 400,
 };
@@ -494,6 +506,11 @@ static void Present(bool includePos) {
     UpdateLayeredWindow(g_badge, nullptr, includePos ? &dst : nullptr, &sz, g_img.dc, &src, 0, &bf, ULW_ALPHA);
 }
 
+static Bitmap g_haloImg;  // the presentation ring (see below)
+static void RebuildHalo();
+static void PaintHalo();
+static void MoveHalo();
+
 static void Rebuild() {
     float s = Scale();
     bool dot = g_set.style == STYLE_DOT;
@@ -502,6 +519,398 @@ static void Rebuild() {
     g_pad = (int)std::ceil(3 * g_dpi / 96.0f);
     if (g_img.Create(bw + 2 * g_pad, bh + 2 * g_pad))
         RenderBadge(g_img, g_code, g_set.style, bw, bh, 11.5f * s, true);
+    RebuildHalo();  // its size follows the monitor's DPI
+    PaintHalo();
+    MoveHalo();
+}
+
+// ---------------------------------------------------------------------------
+// Presentation tools, each usable alone or together:
+//   * Spotlight, after Hazyzh/cursor-highlight: the screen is dimmed except for a circle around the pointer, ringed
+//     by a slowly turning rainbow. It stays click-through, so you keep working underneath.
+//   * Zoom: the circle shows what is under the pointer, magnified (Windows' Magnification API: no special rights).
+//   * Draw: pen strokes over everything until you leave; while drawing, clicks go to the pen.
+// Clicks send out a ripple in the language's colour. Ctrl+Alt + wheel resizes the circle, Ctrl+Alt+= / - zoom in
+// and out, Ctrl+Z takes back the last stroke, Esc leaves drawing first, then everything else. Mouse only.
+// ---------------------------------------------------------------------------
+
+static HWND g_dim, g_halo;          // the dimming layer over all monitors, and the rainbow ring
+static HWND g_lens, g_magnifier;    // zoom: a round window with the system's magnifier control inside
+static HWND g_draw;                 // the drawing layer over all monitors
+static bool g_zoom = false, g_drawing = false;
+static float* g_ringCov = nullptr;  // per ring pixel: coverage 0..1
+static float* g_ringTurn = nullptr; // ... and its angle, in turns (0..1)
+static float g_spin = 0;            // ring rotation, in turns
+static RECT g_virtual;              // the whole virtual screen (all monitors)
+struct Ripple {
+    HWND wnd;
+    Bitmap img;
+    POINT at;
+    DWORD start;
+    bool live;
+};
+static Ripple g_ripples[3];
+static int g_nextRipple = 0;
+static const DWORD kRippleMs = 400;
+static const Rgb kRainbow[] = {{0, 1, 1}, {0.70f, 1, 0.53f}, {0.91f, 1, 0.31f}, {1, 0.31f, 0.31f},
+                               {0.04f, 0.96f, 0.48f}, {1, 1, 1}, {0, 1, 1}};
+
+// The ring (and the circle inside it) is up for the spotlight and for zoom.
+static bool CircleOn() { return g_set.presentation || g_zoom; }
+
+// A premultiplied, anti-aliased ring in one colour, centred in `out` (the click ripples).
+static void RenderRing(Bitmap& out, float radius, float width, Rgb c, float ringA) {
+    const float cx = out.w / 2.0f, cy = out.h / 2.0f;
+    for (int y = 0; y < out.h; y++)
+        for (int x = 0; x < out.w; x++) {
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy, d = std::sqrt(dx * dx + dy * dy);
+            float a = Clamp01(width / 2 - std::fabs(d - radius) + 0.5f) * ringA;
+            auto ch = [a](float v) { return (DWORD)std::lround(v * a * 255); };
+            out.px[y * out.w + x] = ((DWORD)std::lround(a * 255) << 24) | (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b);
+        }
+}
+
+static float DpiScale() { return g_dpi / 96.0f; }
+static float SpotRadius() { return std::min(std::max((float)g_set.spotRadius, 40.0f), 300.0f) * DpiScale(); }
+static float ZoomFactor() { return std::min(std::max((float)g_set.zoomLevel, 15.0f), 80.0f) / 10; }
+
+// Geometry of the rainbow ring, worked out once per size; each animation frame then only looks up colours.
+static void RebuildHalo() {
+    if (!CircleOn()) return;
+    float r = SpotRadius(), w = std::max(r / 30, 3 * DpiScale()), ringR = r + w / 2 - 1;  // overlaps the hole by 1px
+    int side = (int)std::ceil(2 * (ringR + w)) + 4;
+    if (!g_haloImg.Create(side, side)) return;
+    delete[] g_ringCov;
+    delete[] g_ringTurn;
+    g_ringCov = new float[side * side];
+    g_ringTurn = new float[side * side];
+    const float c = side / 2.0f;
+    for (int y = 0; y < side; y++)
+        for (int x = 0; x < side; x++) {
+            float dx = x + 0.5f - c, dy = y + 0.5f - c, d = std::sqrt(dx * dx + dy * dy);
+            g_ringCov[y * side + x] = Clamp01(w / 2 - std::fabs(d - ringR) + 0.5f);
+            g_ringTurn[y * side + x] = std::atan2(dy, dx) / 6.2831853f + 0.5f;
+        }
+}
+
+static void PaintHalo() {
+    if (!g_haloImg.px || !g_ringCov) return;
+    const int n = g_haloImg.w * g_haloImg.h;
+    for (int i = 0; i < n; i++) {
+        float a = g_ringCov[i] * 0.85f;
+        if (a <= 0) { g_haloImg.px[i] = 0; continue; }
+        float t = g_ringTurn[i] + g_spin;
+        t = (t - std::floor(t)) * 6;
+        int k = std::min((int)t, 5);
+        float f = t - k;
+        Rgb c0 = kRainbow[k], c1 = kRainbow[k + 1];
+        Rgb c = {c0.r + (c1.r - c0.r) * f, c0.g + (c1.g - c0.g) * f, c0.b + (c1.b - c0.b) * f};
+        auto ch = [a](float v) { return (DWORD)std::lround(v * a * 255); };
+        g_haloImg.px[i] = ((DWORD)std::lround(a * 255) << 24) | (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b);
+    }
+}
+
+static void ShowLayered(HWND wnd, Bitmap& img, POINT centre) {
+    POINT src = {0, 0}, dst = {centre.x - img.w / 2, centre.y - img.h / 2};
+    SIZE sz = {img.w, img.h};
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(wnd, nullptr, &dst, &sz, img.dc, &src, 0, &bf, ULW_ALPHA);
+}
+
+// Magnification.dll, loaded on first use of zoom.
+struct MagTransform { float v[3][3]; };
+static BOOL(WINAPI* g_magSetSource)(HWND, RECT);
+static BOOL(WINAPI* g_magSetTransform)(HWND, MagTransform*);
+static BOOL(WINAPI* g_magSetFilter)(HWND, DWORD, int, HWND*);
+static int g_lensSide = 0;
+
+template <typename F> static void LoadProc(HMODULE dll, const char* name, F& fn) {
+    fn = reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(dll, name)));
+}
+
+static bool MakeLens() {
+    if (g_magnifier) return true;
+    HMODULE dll = LoadLibraryExW(L"Magnification.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!dll) return false;
+    BOOL(WINAPI* init)() = nullptr;
+    LoadProc(dll, "MagInitialize", init);
+    LoadProc(dll, "MagSetWindowSource", g_magSetSource);
+    LoadProc(dll, "MagSetWindowTransform", g_magSetTransform);
+    LoadProc(dll, "MagSetWindowFilterList", g_magSetFilter);
+    if (!init || !g_magSetSource || !g_magSetTransform || !g_magSetFilter || !init()) return false;
+    g_lens = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                             L"CursorLingoOverlay", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, g_inst, nullptr);
+    SetLayeredWindowAttributes(g_lens, 0, 255, LWA_ALPHA);
+    g_magnifier = CreateWindowExW(0, L"Magnifier", L"", WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, g_lens, nullptr, g_inst, nullptr);
+    if (!g_magnifier) {
+        DestroyWindow(g_lens);
+        g_lens = nullptr;
+        return false;
+    }
+    // Never magnify our own layers, the lens included.
+    HWND mine[] = {g_lens, g_dim, g_halo, g_badge, g_draw, g_ripples[0].wnd, g_ripples[1].wnd, g_ripples[2].wnd};
+    g_magSetFilter(g_magnifier, 0 /* MW_FILTERMODE_EXCLUDE */, 8, mine);
+    return true;
+}
+
+static void ApplyZoomLevel() {
+    if (!g_magnifier) return;
+    float z = ZoomFactor();
+    MagTransform t = {{{z, 0, 0}, {0, z, 0}, {0, 0, 1}}};
+    g_magSetTransform(g_magnifier, &t);
+}
+
+// Puts the lens over the pointer and aims it at the circle around it, ZoomFactor() times smaller than the lens.
+static void MoveLens() {
+    if (!g_zoom || !g_magnifier) return;
+    int r = (int)std::lround(SpotRadius()), side = 2 * r;
+    if (side != g_lensSide) {
+        g_lensSide = side;
+        SetWindowPos(g_magnifier, nullptr, 0, 0, side, side, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowRgn(g_lens, CreateEllipticRgn(0, 0, side + 1, side + 1), TRUE);
+    }
+    SetWindowPos(g_lens, nullptr, g_pt.x - r, g_pt.y - r, side, side, SWP_NOZORDER | SWP_NOACTIVATE);
+    int half = (int)std::lround(r / ZoomFactor());
+    int x = std::min(std::max((int)g_pt.x, (int)g_virtual.left + half), (int)g_virtual.right - half);  // stay on screen
+    int y = std::min(std::max((int)g_pt.y, (int)g_virtual.top + half), (int)g_virtual.bottom - half);
+    g_magSetSource(g_magnifier, RECT{x - half, y - half, x + half, y + half});
+    InvalidateRect(g_magnifier, nullptr, FALSE);
+}
+
+// Moves the hole in the dimming layer, the ring and the lens with the pointer.
+static void MoveHalo() {
+    if (!CircleOn() || !g_haloImg.px) return;
+    if (g_set.presentation) {
+        int r = (int)std::lround(SpotRadius()), x = g_pt.x - g_virtual.left, y = g_pt.y - g_virtual.top;
+        HRGN region = CreateRectRgn(0, 0, g_virtual.right - g_virtual.left, g_virtual.bottom - g_virtual.top);
+        HRGN hole = CreateEllipticRgn(x - r, y - r, x + r + 1, y + r + 1);
+        CombineRgn(region, region, hole, RGN_DIFF);
+        DeleteObject(hole);
+        SetWindowRgn(g_dim, region, TRUE);  // the window owns the region now
+    }
+    ShowLayered(g_halo, g_haloImg, g_pt);
+    MoveLens();
+}
+
+static void PlaceDim() {
+    g_virtual = {GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0};
+    g_virtual.right = g_virtual.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    g_virtual.bottom = g_virtual.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    SetWindowPos(g_dim, HWND_TOPMOST, g_virtual.left, g_virtual.top, g_virtual.right - g_virtual.left,
+                 g_virtual.bottom - g_virtual.top, SWP_NOACTIVATE);
+}
+
+// Keeps the stacking order: dimming layer, drawing, lens, ring, then the badge on top.
+static void RaiseOverlays() {
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+    if (g_set.presentation) SetWindowPos(g_dim, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (g_drawing) SetWindowPos(g_draw, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (g_zoom) SetWindowPos(g_lens, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (CircleOn()) SetWindowPos(g_halo, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    if (g_visible) SetWindowPos(g_badge, HWND_TOPMOST, 0, 0, 0, 0, flags);
+}
+
+// Shortcuts that only make sense while a tool is on, so they are taken from other apps only then.
+static void UpdatePresentKeys() {
+    for (int id : {HOTKEY_ESCAPE, HOTKEY_ZOOM_IN, HOTKEY_ZOOM_OUT, HOTKEY_UNDO}) UnregisterHotKey(g_host, id);
+    if (CircleOn() || g_drawing) RegisterHotKey(g_host, HOTKEY_ESCAPE, MOD_NOREPEAT, VK_ESCAPE);
+    if (g_zoom) {
+        RegisterHotKey(g_host, HOTKEY_ZOOM_IN, MOD_CONTROL | MOD_ALT, VK_OEM_PLUS);
+        RegisterHotKey(g_host, HOTKEY_ZOOM_OUT, MOD_CONTROL | MOD_ALT, VK_OEM_MINUS);
+    }
+    if (g_drawing) RegisterHotKey(g_host, HOTKEY_UNDO, MOD_CONTROL, 'Z');
+}
+
+// Shows the dimming layer, the lens and the ring to match what is on.
+static void UpdateCircle() {
+    PlaceDim();
+    GetCursorPos(&g_pt);
+    if (CircleOn()) {
+        RebuildHalo();
+        PaintHalo();
+        g_lensSide = 0;
+        ApplyZoomLevel();
+        MoveHalo();
+        ShowWindow(g_dim, g_set.presentation ? SW_SHOWNOACTIVATE : SW_HIDE);
+        if (g_lens) ShowWindow(g_lens, g_zoom ? SW_SHOWNOACTIVATE : SW_HIDE);
+        ShowWindow(g_halo, SW_SHOWNOACTIVATE);
+        RaiseOverlays();
+        SetTimer(g_host, TIMER_SPIN, 33, nullptr);
+    } else {
+        KillTimer(g_host, TIMER_SPIN);
+        ShowWindow(g_halo, SW_HIDE);
+        ShowWindow(g_dim, SW_HIDE);
+        if (g_lens) ShowWindow(g_lens, SW_HIDE);
+        g_haloImg.Destroy();
+    }
+    if (g_zoom) SetTimer(g_host, TIMER_LENS, 16, nullptr);  // the magnifier only redraws when asked
+    else KillTimer(g_host, TIMER_LENS);
+    UpdatePresentKeys();
+}
+
+static void SetPresentation(bool on) {
+    g_set.presentation = on;
+    UpdateCircle();
+}
+
+static void SetZoom(bool on) {
+    g_zoom = on && MakeLens();
+    UpdateCircle();
+}
+
+// The drawing layer: a per-pixel-alpha window over all monitors. Its empty pixels are alpha 1/255, invisible but
+// solid enough to take the mouse; strokes are drawn into it in software, one segment at a time.
+static Bitmap g_drawImg;
+static std::vector<POINT> g_penPoints;
+static std::vector<size_t> g_strokeStarts;  // index of each stroke's first point
+static const Rgb kPen = {1, 0.23f, 0.19f};
+static const DWORD kBlank = 0x01000000;
+
+static void PresentDraw(const RECT* dirty) {
+    POINT src = {0, 0}, dst = {g_virtual.left, g_virtual.top};
+    SIZE sz = {g_drawImg.w, g_drawImg.h};
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UPDATELAYEREDWINDOWINFO info = {sizeof(info), nullptr, &dst, &sz, g_drawImg.dc, &src, 0, &bf, ULW_ALPHA, dirty};
+    UpdateLayeredWindowIndirect(g_draw, &info);
+}
+
+// An anti-aliased round-capped line from a to b (window pixels); grows `dirty` to cover it.
+static void PenSegment(POINT a, POINT b, RECT* dirty) {
+    const float w = 5 * DpiScale(), reach = w / 2 + 1;
+    RECT box = {std::max(0L, std::min(a.x, b.x) - (LONG)std::ceil(reach)), std::max(0L, std::min(a.y, b.y) - (LONG)std::ceil(reach)),
+                std::min((LONG)g_drawImg.w, std::max(a.x, b.x) + (LONG)std::ceil(reach) + 1),
+                std::min((LONG)g_drawImg.h, std::max(a.y, b.y) + (LONG)std::ceil(reach) + 1)};
+    const float dx = (float)(b.x - a.x), dy = (float)(b.y - a.y), len2 = dx * dx + dy * dy;
+    for (LONG y = box.top; y < box.bottom; y++)
+        for (LONG x = box.left; x < box.right; x++) {
+            float px = x + 0.5f - a.x, py = y + 0.5f - a.y;
+            float t = len2 > 0 ? Clamp01((px * dx + py * dy) / len2) : 0;
+            float ex = px - t * dx, ey = py - t * dy;
+            float cov = Clamp01(w / 2 - std::sqrt(ex * ex + ey * ey) + 0.5f);
+            DWORD& p = g_drawImg.px[y * g_drawImg.w + x];
+            if (cov * 255 <= (p >> 24)) continue;  // overlapping strokes: keep the stronger
+            auto ch = [cov](float v) { return (DWORD)std::lround(v * cov * 255); };
+            p = ((DWORD)std::lround(cov * 255) << 24) | (ch(kPen.r) << 16) | (ch(kPen.g) << 8) | ch(kPen.b);
+        }
+    UnionRect(dirty, dirty, &box);
+}
+
+static void SetDrawing(bool on) {
+    g_drawing = false;
+    g_penPoints.clear();
+    g_strokeStarts.clear();
+    ShowWindow(g_draw, SW_HIDE);
+    g_drawImg.Destroy();
+    if (on) {
+        PlaceDim();  // reads the virtual screen
+        if (g_drawImg.Create(g_virtual.right - g_virtual.left, g_virtual.bottom - g_virtual.top)) {
+            g_drawing = true;
+            std::fill(g_drawImg.px, g_drawImg.px + g_drawImg.w * g_drawImg.h, kBlank);
+            PresentDraw(nullptr);
+            ShowWindow(g_draw, SW_SHOWNOACTIVATE);
+            RaiseOverlays();
+        }
+    }
+    UpdatePresentKeys();
+}
+
+static void UndoStroke() {
+    if (g_strokeStarts.empty()) return;
+    g_penPoints.resize(g_strokeStarts.back());
+    g_strokeStarts.pop_back();
+    std::fill(g_drawImg.px, g_drawImg.px + g_drawImg.w * g_drawImg.h, kBlank);
+    RECT dirty = {};
+    for (size_t s = 0; s < g_strokeStarts.size(); s++) {
+        size_t first = g_strokeStarts[s], end = s + 1 < g_strokeStarts.size() ? g_strokeStarts[s + 1] : g_penPoints.size();
+        for (size_t i = first; i < end; i++) PenSegment(g_penPoints[i == first ? i : i - 1], g_penPoints[i], &dirty);
+    }
+    PresentDraw(nullptr);
+}
+
+static LRESULT CALLBACK DrawProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)};
+    RECT dirty = {};
+    switch (msg) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;  // the app underneath keeps the keyboard
+        case WM_LBUTTONDOWN:
+            SetCapture(h);
+            g_strokeStarts.push_back(g_penPoints.size());
+            g_penPoints.push_back(p);
+            PenSegment(p, p, &dirty);  // a click leaves a dot
+            PresentDraw(&dirty);
+            return 0;
+        case WM_MOUSEMOVE:
+            if (GetCapture() != h || g_penPoints.empty()) return 0;
+            PenSegment(g_penPoints.back(), p, &dirty);
+            g_penPoints.push_back(p);
+            PresentDraw(&dirty);
+            return 0;
+        case WM_LBUTTONUP:
+            ReleaseCapture();
+            return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+static void SpinHalo() {
+    if (!g_haloImg.px) return;
+    g_spin = std::fmod(g_spin + 33.0f / 6000, 1.0f);  // one turn every 6 s
+    PaintHalo();
+    ShowLayered(g_halo, g_haloImg, g_pt);
+}
+
+// Ctrl+Alt + wheel: 10 points per notch.
+static void ResizeSpotlight(int delta) {
+    int r = (int)g_set.spotRadius + (delta > 0 ? 10 : -10);
+    g_set.spotRadius = (DWORD)std::min(std::max(r, 40), 300);
+    RebuildHalo();
+    PaintHalo();
+    MoveHalo();
+    SetTimer(g_host, TIMER_SAVE, 1000, nullptr);  // save once the wheel stops
+}
+
+// Ctrl+Alt+= / -: a quarter more or a fifth less, between 1.5x and 8x.
+static void StepZoom(bool in) {
+    int z = (int)std::lround(ZoomFactor() * 10);
+    z = in ? std::min(80, z + std::max(2, z / 4)) : std::max(15, z - std::max(2, z / 5));
+    g_set.zoomLevel = (DWORD)z;
+    ApplyZoomLevel();
+    MoveLens();
+    SetTimer(g_host, TIMER_SAVE, 1000, nullptr);
+}
+
+// Runs from the message loop: start a ripple at `at` (screen pixels).
+static void StartRipple(POINT at) {
+    Ripple& r = g_ripples[g_nextRipple];
+    g_nextRipple = (g_nextRipple + 1) % 3;
+    r.at = at;
+    r.start = GetTickCount();
+    r.live = true;
+    int side = (int)std::ceil(2 * 40 * DpiScale());
+    if (r.img.w != side) r.img.Create(side, side);
+    SetTimer(g_host, TIMER_RIPPLE, 16, nullptr);
+}
+
+// One animation frame for every live ripple: it grows and fades out over kRippleMs.
+static void StepRipples() {
+    bool any = false;
+    for (Ripple& r : g_ripples) {
+        if (!r.live) continue;
+        float t = (GetTickCount() - r.start) / (float)kRippleMs;
+        if (t >= 1 || !r.img.px) {
+            r.live = false;
+            ShowWindow(r.wnd, SW_HIDE);
+            continue;
+        }
+        any = true;
+        float s = DpiScale(), ease = 1 - (1 - t) * (1 - t);
+        RenderRing(r.img, (8 + 28 * ease) * s, 4 * s, AccentFor(g_code), 1 - t);
+        ShowLayered(r.wnd, r.img, r.at);
+        if (!IsWindowVisible(r.wnd))
+            SetWindowPos(r.wnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+    if (!any) KillTimer(g_host, TIMER_RIPPLE);
 }
 
 // Tray icon showing the current language.
@@ -1092,8 +1501,19 @@ static void CheckSelectionCopy() {
 }
 
 static LRESULT CALLBACK MouseHook(int code, WPARAM wp, LPARAM lp) {
-    if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) ResetWords();  // caret moved
-    if (code == HC_ACTION && wp == WM_MOUSEMOVE && g_visible) {
+    if (code == HC_ACTION && (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN)) {
+        ResetWords();  // caret moved
+        if (CircleOn() && !g_drawing) {
+            POINT pt = ((MSLLHOOKSTRUCT*)lp)->pt;
+            PostMessageW(g_host, WM_APP_RIPPLE, (WPARAM)(INT_PTR)pt.x, (LPARAM)pt.y);
+        }
+    }
+    if (code == HC_ACTION && wp == WM_MOUSEWHEEL && CircleOn() && (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+        (GetAsyncKeyState(VK_MENU) & 0x8000)) {
+        PostMessageW(g_host, WM_APP_SPOT_SIZE, (WPARAM)(short)HIWORD(((MSLLHOOKSTRUCT*)lp)->mouseData), 0);
+        return 1;  // Ctrl+Alt + wheel is ours while the circle is up: don't zoom the app underneath
+    }
+    if (code == HC_ACTION && wp == WM_MOUSEMOVE && (g_visible || CircleOn())) {
         g_pt = ((MSLLHOOKSTRUCT*)lp)->pt;
         // Coalesce: at most one pending move message, so fast mice never flood the queue.
         if (!InterlockedExchange(&g_movePending, 1)) PostMessageW(g_badge, WM_APP_MOVE, 0, 0);
@@ -1187,7 +1607,7 @@ static void CALLBACK ForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, D
     ResetWords();
     bool changed = UpdateLanguage();
     Refresh(changed);
-    if (g_visible) SetWindowPos(g_badge, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    RaiseOverlays();
 }
 
 static void AddTrayIcon() {
@@ -1235,6 +1655,18 @@ static void ShowMenu() {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)mode, TR(L"Show", L"แสดงป้าย"));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, TR(L"Style", L"รูปแบบ"));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)size, TR(L"Size", L"ขนาด"));
+    HMENU present = CreatePopupMenu();
+    AppendMenuW(present, MF_STRING | (g_set.presentation ? MF_CHECKED : 0), ID_PRESENTATION,
+                TR(L"Spotlight\tCtrl+Alt+H", L"สปอตไลต์\tCtrl+Alt+H"));
+    AppendMenuW(present, MF_STRING | (g_zoom ? MF_CHECKED : 0), ID_ZOOM, TR(L"Zoom\tCtrl+Alt+Z", L"ซูม\tCtrl+Alt+Z"));
+    AppendMenuW(present, MF_STRING | (g_drawing ? MF_CHECKED : 0), ID_DRAW,
+                TR(L"Draw on screen\tCtrl+Alt+D", L"วาดบนจอ\tCtrl+Alt+D"));
+    AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt + wheel: resize the circle", L"Ctrl+Alt + ล้อเมาส์: ปรับขนาดวง"));
+    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt+= / \u2212: zoom in / out", L"Ctrl+Alt+= / \u2212: ซูมเข้า / ออก"));
+    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Z: undo last stroke", L"Ctrl+Z: ลบเส้นล่าสุด"));
+    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Esc: stop drawing, then exit", L"Esc: เลิกวาด กดอีกครั้งเพื่อออก"));
+    AppendMenuW(m, MF_POPUP | (CircleOn() || g_drawing ? MF_CHECKED : 0), (UINT_PTR)present, TR(L"Presentation", L"นำเสนอ"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // One menu for the whole feature: Off, Double Shift only (fix on request) or Automatic.
     const int fixMode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
@@ -1279,6 +1711,13 @@ static void ShowMenu() {
         return;
     }
     if (cmd == ID_FORGET_WORDS) { g_ruleCount = 0; SaveRules(); return; }
+    if (cmd == ID_PRESENTATION) {
+        SetPresentation(!g_set.presentation);
+        SaveSettings();
+        return;
+    }
+    if (cmd == ID_ZOOM) { SetZoom(!g_zoom); return; }
+    if (cmd == ID_DRAW) { SetDrawing(!g_drawing); return; }
     if (cmd == ID_PER_APP) {
         g_set.perAppLanguage = !g_set.perAppLanguage;
         SaveSettings();  // the first app is remembered when it comes back to the front
@@ -1315,10 +1754,9 @@ static LRESULT CALLBACK BadgeProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_APP_MOVE:
             InterlockedExchange(&g_movePending, 0);
-            if (g_visible) {
-                UpdateMonitor(g_pt);
-                Present(true);
-            }
+            if (g_visible || CircleOn()) UpdateMonitor(g_pt);
+            if (g_visible) Present(true);
+            MoveHalo();
             return 0;
         case WM_TIMER:
             if (wp == TIMER_POLL) {
@@ -1360,9 +1798,41 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_LEARN:
             LearnPending();
             return 0;
+        case WM_APP_RIPPLE:
+            StartRipple({(LONG)(INT_PTR)wp, (LONG)lp});
+            return 0;
+        case WM_APP_SPOT_SIZE:
+            ResizeSpotlight((int)(short)wp);
+            return 0;
+        case WM_HOTKEY:
+            if (wp == HOTKEY_PRESENTATION) {
+                SetPresentation(!g_set.presentation);
+                SaveSettings();
+            } else if (wp == HOTKEY_ZOOM) {
+                SetZoom(!g_zoom);
+            } else if (wp == HOTKEY_DRAW) {
+                SetDrawing(!g_drawing);
+            } else if (wp == HOTKEY_ZOOM_IN || wp == HOTKEY_ZOOM_OUT) {
+                StepZoom(wp == HOTKEY_ZOOM_IN);
+            } else if (wp == HOTKEY_UNDO) {
+                UndoStroke();
+            } else if (wp == HOTKEY_ESCAPE) {
+                if (g_drawing) {
+                    SetDrawing(false);  // the first Esc puts the pen down, the next one leaves
+                } else {
+                    g_zoom = false;
+                    SetPresentation(false);
+                    SaveSettings();
+                }
+            }
+            return 0;
         case WM_TIMER:
             if (wp == TIMER_COPY) CheckSelectionCopy();
             if (wp == TIMER_RESTORE) { KillTimer(h, TIMER_RESTORE); RestoreClipboard(); }
+            if (wp == TIMER_RIPPLE) StepRipples();
+            if (wp == TIMER_SPIN) SpinHalo();
+            if (wp == TIMER_LENS) MoveLens();
+            if (wp == TIMER_SAVE) { KillTimer(h, TIMER_SAVE); SaveSettings(); }
             return 0;
         case WM_POWERBROADCAST:
             if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) ReinstallHooks();
@@ -1373,6 +1843,11 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE:
             g_monRect = {1, 1, 0, 0};  // force monitor re-query
+            if (msg == WM_DISPLAYCHANGE && CircleOn()) {
+                PlaceDim();
+                MoveHalo();
+            }
+            if (msg == WM_DISPLAYCHANGE && g_drawing) SetDrawing(true);  // a fresh layer that fits the new screens
             return 0;
         case WM_DESTROY:
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
@@ -1398,6 +1873,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.lpfnWndProc = BadgeProc;
     wc.lpszClassName = L"CursorLingoBadge";
     RegisterClassW(&wc);
+    wc.lpfnWndProc = DefWindowProcW;  // presentation ring and ripples: drawn with UpdateLayeredWindow only
+    wc.lpszClassName = L"CursorLingoOverlay";
+    RegisterClassW(&wc);
+    wc.lpszClassName = L"CursorLingoDim";  // the spotlight's dimming layer: a plain colour, made translucent
+    wc.hbrBackground = CreateSolidBrush(RGB(0x45, 0x57, 0x61));
+    RegisterClassW(&wc);
+    wc.hbrBackground = nullptr;
+    wc.lpfnWndProc = DrawProc;  // the drawing layer
+    wc.lpszClassName = L"CursorLingoDraw";
+    wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+    RegisterClassW(&wc);
+    wc.hCursor = nullptr;
     wc.lpfnWndProc = HostProc;
     wc.lpszClassName = L"CursorLingoHost";
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
@@ -1406,6 +1893,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     g_host = CreateWindowExW(0, L"CursorLingoHost", kAppName, 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     g_badge = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                               L"CursorLingoBadge", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
+    const DWORD overlay = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    g_halo = CreateWindowExW(overlay, L"CursorLingoOverlay", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
+    g_dim = CreateWindowExW(overlay, L"CursorLingoDim", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
+    SetLayeredWindowAttributes(g_dim, 0, 153, LWA_ALPHA);  // 60 %
+    g_draw = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorLingoDraw", L"",
+                             WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
+    for (Ripple& r : g_ripples)
+        r.wnd = CreateWindowExW(overlay, L"CursorLingoOverlay", L"", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     GetCursorPos(&g_pt);
@@ -1414,6 +1909,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     Rebuild();
     AddTrayIcon();
     Refresh(false);
+    if (g_set.presentation) SetPresentation(true);
+    // Ctrl+Alt+H spotlight, Ctrl+Alt+Z zoom, Ctrl+Alt+D draw, from anywhere (RegisterHotKey needs no special rights).
+    RegisterHotKey(g_host, HOTKEY_PRESENTATION, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'H');
+    RegisterHotKey(g_host, HOTKEY_ZOOM, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Z');
+    RegisterHotKey(g_host, HOTKEY_DRAW, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D');
 
     // Portable use: if the exe was moved, keep "Start with Windows" pointing at its current location.
     if (StartupEnabled()) SetStartup(true);
@@ -1434,6 +1934,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
 
+    for (int id : {HOTKEY_PRESENTATION, HOTKEY_ZOOM, HOTKEY_DRAW}) UnregisterHotKey(g_host, id);
     WTSUnRegisterSessionNotification(g_host);
     UnhookWindowsHookEx(g_mouseHook);
     SetAutoFix(false);

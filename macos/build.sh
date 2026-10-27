@@ -15,6 +15,7 @@ for arch in arm64 x86_64; do
   clang++ -std=c++17 -Os -fno-exceptions -fno-rtti -target "$arch-apple-macos12.0" \
     -c ../core/layoutfix_c.cpp -o "../build/layoutfix-$arch.o"
   swiftc -O -whole-module-optimization -target "$arch-apple-macos12.0" \
+    -Xlinker -weak_framework -Xlinker ScreenCaptureKit \
     -import-objc-header ../core/layoutfix_c.h \
     CursorLingo.swift "../build/layoutfix-$arch.o" -o "../build/CursorLingo-$arch"
 done

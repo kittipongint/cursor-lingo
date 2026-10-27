@@ -8,7 +8,7 @@
 
 ## What the app does on your computer
 
-**Language badge.** To show your input language next to the pointer, CursorLingo reads the current keyboard layout and the pointer position. These are used immediately and never stored.
+**Language badge.** To show your input language next to the pointer, CursorLingo reads the current keyboard layout and the pointer position. These are used immediately and never stored. With the *Presentation* tools on, the position of each mouse click is used to draw a ripple there, and the mouse wheel is watched only while Control and Option (Ctrl and Alt) are held, to resize the circle. *Zoom* shows the screen around the pointer, magnified: it reads the screen image only while zoom is on, only to draw it in the circle, and never saves or sends it. Lines you draw with *Draw on Screen* are kept in memory until you stop drawing. Nothing of this is kept.
 
 **Fix Wrong Language (optional, off by default).** When you turn it on (*Double Shift Only* or *Automatic*), CursorLingo watches the keys you press so it can notice a word typed in the wrong layout (English ⇄ Thai) and type it again in the right one.
 
@@ -29,7 +29,7 @@ Everything stays on your device:
 ## Permissions
 
 - **Windows:** no special permissions. The Microsoft Store version declares *runFullTrust*, which every classic desktop app needs; CursorLingo uses it for its keyboard and mouse hooks.
-- **macOS:** *Input Monitoring* and *Accessibility*, requested only when you turn on Fix Wrong Language. The language badge needs neither.
+- **macOS:** *Input Monitoring* and *Accessibility*, requested only when you turn on Fix Wrong Language, and *Screen Recording*, requested only when you turn on the presentation zoom. The language badge needs none of them.
 
 ## Links
 
@@ -55,7 +55,7 @@ Changes to this policy are published in this file, in the project's public histo
 
 ## แอปทำอะไรในเครื่องของคุณ
 
-**ป้ายบอกภาษา:** เพื่อแสดงภาษาที่ใช้อยู่ข้างตัวชี้เมาส์ CursorLingo อ่านแป้นพิมพ์ที่ใช้อยู่และตำแหน่งเมาส์ ใช้ทันทีและไม่ได้บันทึกไว้
+**ป้ายบอกภาษา:** เพื่อแสดงภาษาที่ใช้อยู่ข้างตัวชี้เมาส์ CursorLingo อ่านแป้นพิมพ์ที่ใช้อยู่และตำแหน่งเมาส์ ใช้ทันทีและไม่ได้บันทึกไว้ เมื่อเปิดเครื่องมือ *นำเสนอ* จะใช้ตำแหน่งที่คลิกเมาส์เพื่อวาดวงคลื่นตรงนั้น และดูล้อเมาส์เฉพาะตอนกด Control กับ Option (Ctrl กับ Alt) ค้างไว้ เพื่อปรับขนาดวง *ซูม* จะแสดงภาพบนจอรอบเมาส์แบบขยาย โดยอ่านภาพหน้าจอเฉพาะตอนเปิดซูม เพื่อวาดในวงกลมเท่านั้น ไม่บันทึกและไม่ส่งไปไหน เส้นที่วาดด้วย *วาดบนจอ* อยู่ในหน่วยความจำจนกว่าจะเลิกวาด ทั้งหมดนี้ไม่ได้เก็บไว้
 
 **แก้คำที่พิมพ์ผิดภาษา (ไม่บังคับ ปิดไว้เป็นค่าเริ่มต้น):** เมื่อเปิดใช้ (*กด Shift 2 ครั้งเพื่อแก้* หรือ *แก้ให้อัตโนมัติ*) CursorLingo จะดูปุ่มที่คุณกด เพื่อจับคำที่พิมพ์ผิดภาษา (อังกฤษ ⇄ ไทย) แล้วพิมพ์ใหม่ให้ถูก
 
@@ -76,7 +76,7 @@ Changes to this policy are published in this file, in the project's public histo
 ## สิทธิ์ที่ใช้
 
 - **Windows:** ไม่ต้องใช้สิทธิ์พิเศษ เวอร์ชัน Microsoft Store ประกาศสิทธิ์ *runFullTrust* ซึ่งแอป desktop แบบดั้งเดิมทุกตัวต้องมี CursorLingo ใช้สิทธิ์นี้สำหรับการฟังแป้นพิมพ์และเมาส์
-- **macOS:** *Input Monitoring* และ *Accessibility* ขอเฉพาะตอนเปิดใช้การแก้คำที่พิมพ์ผิดภาษา ป้ายบอกภาษาไม่ต้องใช้สิทธิ์ใดเลย
+- **macOS:** *Input Monitoring* และ *Accessibility* ขอเฉพาะตอนเปิดใช้การแก้คำที่พิมพ์ผิดภาษา และ *Screen Recording* ขอเฉพาะตอนเปิดซูมในเครื่องมือนำเสนอ ป้ายบอกภาษาไม่ต้องใช้สิทธิ์ใดเลย
 
 ## ลิงก์
 
