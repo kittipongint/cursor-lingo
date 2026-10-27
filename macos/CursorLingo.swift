@@ -114,13 +114,15 @@ struct Settings {
     }
     /// Radius of the presentation spotlight, in points.
     static var spotlightRadius: Double {
-        get { d.object(forKey: "spotlightRadius") as? Double ?? 100 }
+        get { (d.object(forKey: "spotlightRadius") as? Double).flatMap { $0.isFinite ? $0 : nil } ?? 100 }
         set { d.set(newValue, forKey: "spotlightRadius") }
     }
     /// The shortcut of a presentation tool: its default until changed, nil once cleared.
     static func shortcut(_ tool: PresentTool) -> Shortcut? {
         guard let keys = d.array(forKey: "shortcut." + tool.rawValue) as? [Int] else { return tool.defaultShortcut }
-        return keys.count == 2 ? Shortcut(keyCode: keys[0], modifiers: keys[1]) : nil
+        guard keys.count == 2 else { return nil }
+        let s = Shortcut(keyCode: keys[0], modifiers: keys[1])
+        return s.isValid ? s : tool.defaultShortcut  // edited by hand into something no key press could make
     }
     static func setShortcut(_ s: Shortcut?, for tool: PresentTool) {
         d.set(s.map { [$0.keyCode, $0.modifiers] } ?? [], forKey: "shortcut." + tool.rawValue)
@@ -130,7 +132,7 @@ struct Settings {
     }
     /// Magnification of the presentation zoom lens.
     static var zoomLevel: Double {
-        get { d.object(forKey: "zoomLevel") as? Double ?? 2 }
+        get { (d.object(forKey: "zoomLevel") as? Double).flatMap { $0.isFinite ? $0 : nil } ?? 2 }
         set { d.set(newValue, forKey: "zoomLevel") }
     }
     /// Bundle ID -> input source ID it was last used with (for perAppLanguage).
@@ -152,6 +154,25 @@ struct Settings {
     static var hidden: Set<String> {
         get { Set(d.stringArray(forKey: "hidden") ?? []) }
         set { d.set(Array(newValue).sorted(), forKey: "hidden") }
+    }
+
+    /// At launch: the lists only ever grow by a few entries at a time, but the preferences file can be edited, or
+    /// damaged. Keep what the app could have written itself, within its limits, and save that back, so a huge or
+    /// broken file costs neither memory nor time from then on.
+    static func tidy() {
+        let colors = badgeColors.filter { $0.key.count <= 3 && NSColor(hex: $0.value) != nil }
+        if colors.count != (d.dictionary(forKey: "badgeColors")?.count ?? 0) || colors.count > 64 {
+            badgeColors = Dictionary(uniqueKeysWithValues: colors.sorted { $0.key < $1.key }.prefix(64).map { ($0.key, $0.value) })
+        }
+        let codes = hidden.filter { (1...3).contains($0.count) }
+        if codes.count != (d.array(forKey: "hidden")?.count ?? 0) || codes.count > 64 { hidden = Set(codes.sorted().prefix(64)) }
+        if d.object(forKey: "personalWords") != nil && d.stringArray(forKey: "personalWords") == nil {
+            d.removeObject(forKey: "personalWords")  // not a list of words: nothing in it can be read
+        }
+        if let apps = d.dictionary(forKey: "appLanguages"), apps.count > 300 || !(apps is [String: String]) {
+            let kept = apps.compactMap { k, v in (v as? String).map { (k, $0) } }.sorted { $0.0 < $1.0 }.prefix(300)
+            appLanguages = Dictionary(uniqueKeysWithValues: kept.map { ($0.0, $0.1) })
+        }
     }
 }
 
@@ -687,9 +708,12 @@ final class AutoFix {
     }
 
     func loadRules() {
-        rules = Settings.personalWords.compactMap { entry in
+        let stored = Settings.personalWords
+        rules = stored.compactMap { entry in
             let c = Array(entry.utf8)
-            guard c.count >= 4, c.count % 2 == 0, c[0] == 48 || c[0] == 49, c[1] == 43 || c[1] == 45 else { return nil }
+            // A word is at most 48 keys (as typed words are, see keyDown).
+            guard c.count >= 4, c.count <= 2 + 2 * 48, c.count % 2 == 0, c[0] == 48 || c[0] == 49,
+                  c[1] == 43 || c[1] == 45 else { return nil }
             var keys: [UInt8] = []
             for i in stride(from: 2, to: c.count, by: 2) {
                 // A damaged entry must not feed bad key indices to the detector (47 keys, plus the Shift bit).
@@ -698,6 +722,9 @@ final class AutoFix {
             }
             return Rule(keys: keys, shown: Int(c[0] - 48), fix: c[1] == 43)
         }
+        // The newest 500, as learn(_:) keeps them; a list edited or damaged by hand is saved back cleaned up.
+        if rules.count > 500 { rules.removeFirst(rules.count - 500) }
+        if rules.count != stored.count { save() }
     }
 
     private func save() {
@@ -1288,6 +1315,12 @@ struct Shortcut: Equatable {
         if f.contains(.shift) { m |= shiftKey }
         if f.contains(.command) { m |= cmdKey }
         self.init(keyCode: Int(event.keyCode), modifiers: m)
+    }
+
+    /// A key from the list above with ⌃, ⌥ or ⌘ (and maybe ⇧), and nothing else: what init?(event:) can make.
+    var isValid: Bool {
+        let all = controlKey | optionKey | shiftKey | cmdKey
+        return Shortcut.names[keyCode] != nil && modifiers & ~all == 0 && modifiers & (controlKey | optionKey | cmdKey) != 0
     }
 
     var display: String {
@@ -2247,6 +2280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let settingsWindow = SettingsWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        autoreleasepool { Settings.tidy() }  // a huge file's temporary copies go now, not at the first event
         buildPanel()
         buildStatusItem()
         cacheScreens()
@@ -2312,7 +2346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         autoFix.fixAsYouType = Settings.fixAsYouType
         autoFix.codeEditorsManual = Settings.codeEditorsManual
-        autoFix.loadRules()
+        autoreleasepool { autoFix.loadRules() }
         refresh(animated: false)
         presenter.setSpotlight(Settings.presentation)
         startAutoFix()   // never prompts at launch; see enableAutoFix()
