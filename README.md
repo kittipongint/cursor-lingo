@@ -195,7 +195,7 @@ Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
 ```
 core/      layoutfix.h (wrong-layout detector, shared) · en_model.inc (generated) · C interface for Swift
 macos/     CursorLingo.swift · Info.plist · build.sh (universal binary)
-windows/   CursorLingo.cpp · CursorLingo.rc · manifest · CMakeLists.txt · build.bat · CursorLingo.iss (installer) · install.ps1
+windows/   CursorLingo.cpp · CursorLingo.rc · manifest · CMakeLists.txt · build.bat · CursorLingo.iss (installer) · msix/ (Microsoft Store package) · install.ps1
 tests/     layoutfix_test.cpp · cases.tsv (real-world fix / keep cases; add yours)
 assets/    AppIcon.png / .icns / .ico, screenshots
 tools/     make-icon.swift (vector icon generator) · make-demo.swift (README animation) · ai-icon.sh (optional AI icon) · gen-en-model.py

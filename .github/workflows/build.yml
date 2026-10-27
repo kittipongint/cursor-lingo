@@ -83,12 +83,29 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
           & $iscc windows/CursorLingo.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Microsoft Store package (MSIX)
+        shell: pwsh
+        run: |
+          # Unsigned on purpose: the Store signs it. Upload this file in Partner Center; it is not for sideloading.
+          $v = (Get-Item build/windows/Release/CursorLingo.exe).VersionInfo
+          $version = "$($v.FileMajorPart).$($v.FileMinorPart).$($v.FileBuildPart).0"  # the Store requires .0
+          New-Item -ItemType Directory -Force build/msix | Out-Null
+          Copy-Item build/windows/Release/CursorLingo.exe build/msix/
+          Copy-Item -Recurse -Force windows/msix/Assets build/msix/
+          (Get-Content windows/msix/AppxManifest.xml -Raw) -replace 'Version="0\.0\.0\.0"', "Version=`"$version`"" |
+            Set-Content build/msix/AppxManifest.xml -Encoding utf8
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $makeappx.FullName pack /d build/msix /p build/CursorLingo-Store-x64.msix /o
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: CursorLingo-Windows
           path: |
             build/CursorLingo-Windows-x64-Setup.exe
             build/CursorLingo-Windows-x64-Portable.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: Store-MSIX, path: build/CursorLingo-Store-x64.msix }
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -96,6 +113,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: dist, merge-multiple: true }
+        with: { path: dist, pattern: "CursorLingo-*", merge-multiple: true }  # not the Store MSIX
       - uses: softprops/action-gh-release@v2
         with: { files: dist/* }

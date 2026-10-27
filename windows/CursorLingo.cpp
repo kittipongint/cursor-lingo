@@ -164,7 +164,21 @@ static void ToggleHidden(const wchar_t* code) {
     }
 }
 
-// "Start with Windows" is a shortcut in the user's Startup folder: no registry entry, and it shows up (and can be
+// Installed from the Microsoft Store (an MSIX package)? Then Windows owns "start with Windows": the package declares
+// a StartupTask, which the user switches on in Settings > Apps > Startup. Writes to %APPDATA% go to the package's
+// own storage, so the settings files below need no change.
+static bool IsPackaged() {
+    static int packaged = -1;
+    if (packaged < 0) {
+        typedef LONG(WINAPI * GetPackageNameFn)(UINT32*, PWSTR);
+        auto fn = (GetPackageNameFn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetCurrentPackageFullName");
+        UINT32 len = 0;
+        packaged = fn && fn(&len, nullptr) == ERROR_INSUFFICIENT_BUFFER;
+    }
+    return packaged == 1;
+}
+
+// Otherwise "Start with Windows" is a shortcut in the user's Startup folder: no registry entry, and it shows up (and can be
 // switched off) in Task Manager's Startup apps like any other.
 static bool StartupLinkPath(wchar_t* out) {
     wchar_t* folder = nullptr;
@@ -175,13 +189,14 @@ static bool StartupLinkPath(wchar_t* out) {
 }
 
 static bool StartupEnabled() {
+    if (IsPackaged()) return false;
     wchar_t link[MAX_PATH];
     return StartupLinkPath(link) && GetFileAttributesW(link) != INVALID_FILE_ATTRIBUTES;
 }
 
 static void SetStartup(bool on) {
     wchar_t link[MAX_PATH], exe[MAX_PATH], dir[MAX_PATH];
-    if (!StartupLinkPath(link)) return;
+    if (IsPackaged() || !StartupLinkPath(link)) return;
     if (!on) { DeleteFileW(link); return; }
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     wcscpy(dir, exe);
@@ -1148,7 +1163,10 @@ static void ShowMenu() {
     swprintf(fixTitle, 96, TR(L"Fix wrong language (EN \u21C4 TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH): %ls"), kFixNames[th][fixMode]);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)fix, fixTitle);
     AppendMenuW(m, MF_STRING | (g_set.perAppLanguage ? MF_CHECKED : 0), ID_PER_APP, TR(L"Remember language per app", L"จำภาษาของแต่ละแอป"));
-    AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, TR(L"Start with Windows", L"เปิดพร้อม Windows"));
+    if (IsPackaged())  // switched in Windows Settings; the app cannot tell whether it is on
+        AppendMenuW(m, MF_STRING, ID_STARTUP, TR(L"Start with Windows\u2026", L"เปิดพร้อม Windows\u2026"));
+    else
+        AppendMenuW(m, MF_STRING | (StartupEnabled() ? MF_CHECKED : 0), ID_STARTUP, TR(L"Start with Windows", L"เปิดพร้อม Windows"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     for (int i = 0; i < 3; i++) AppendMenuW(lang, MF_STRING | (g_set.uiLang == (DWORD)i ? MF_CHECKED : 0), ID_UILANG_BASE + i, kUiLangNames[th][i]);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)lang, L"Language / ภาษา");  // bilingual, so it can always be found
@@ -1163,7 +1181,11 @@ static void ShowMenu() {
 
     if (!cmd) return;
     if (cmd == ID_QUIT) { DestroyWindow(g_host); return; }
-    if (cmd == ID_STARTUP) { SetStartup(!StartupEnabled()); return; }
+    if (cmd == ID_STARTUP) {
+        if (IsPackaged()) ShellExecuteW(nullptr, L"open", L"ms-settings:startupapps", nullptr, nullptr, SW_SHOWNORMAL);
+        else SetStartup(!StartupEnabled());
+        return;
+    }
     if (cmd == ID_REPORT) {  // only opens the issue form; nothing typed is ever attached
         ShellExecuteW(nullptr, L"open", L"https://github.com/kittipongint/cursor-lingo/issues/new/choose", nullptr, nullptr, SW_SHOWNORMAL);
         return;

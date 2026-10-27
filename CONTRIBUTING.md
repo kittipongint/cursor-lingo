@@ -79,4 +79,4 @@ The detector currently knows US English and Thai Kedmanee. To add one (e.g. Thai
 
 ## Releases
 
-Maintainers bump the version in `macos/Info.plist`, `windows/CursorLingo.rc` and `windows/CursorLingo.manifest`, then push a `v*` tag. CI builds, signs and notarizes the macOS app and attaches both zips to the GitHub release.
+Maintainers bump the version in `macos/Info.plist`, `windows/CursorLingo.rc` and `windows/CursorLingo.manifest`, then push a `v*` tag. CI builds, signs and notarizes the macOS app, builds the Windows Setup.exe and portable zip, and attaches them to the GitHub release. It also builds `CursorLingo-Store-x64.msix` (workflow artifact *Store-MSIX*), which a maintainer uploads in Partner Center; the Store signs it. Its identity lives in `windows/msix/AppxManifest.xml`.

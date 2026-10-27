@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest for the Microsoft Store build of CursorLingo.
+  Identity comes from Partner Center (Product identity of 9NBNDFF6M1CQ). CI replaces 0.0.0.0 with the exe's version;
+  the Store signs the package, so it is uploaded unsigned.
+
+  CursorLingo is a full-trust desktop app: its keyboard and mouse hooks need runFullTrust. "Start with Windows" is
+  the StartupTask below, off until the user turns it on in Settings > Apps > Startup (the tray menu opens that page).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap desktop rescap">
+
+  <Identity
+    Name="11665kittipongint.CursorLingo"
+    Publisher="CN=1C250AA6-459B-492E-AAFD-5215FE7592A7"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>CursorLingo</DisplayName>
+    <PublisherDisplayName>kittipongint</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="th-th" />
+  </Resources>
+
+  <Applications>
+    <Application Id="CursorLingo" Executable="CursorLingo.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="CursorLingo"
+        Description="Shows your keyboard language at the mouse pointer and fixes words typed in the wrong layout (English and Thai)."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="CursorLingo.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="CursorLingoStartup" Enabled="false" DisplayName="CursorLingo" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
