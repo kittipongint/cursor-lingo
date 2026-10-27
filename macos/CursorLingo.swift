@@ -1604,9 +1604,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             let l = NSTextField(labelWithString: text)
             l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             l.textColor = .secondaryLabelColor
+            l.setContentCompressionResistancePriority(.required, for: .horizontal)  // the header sets the width
             return l
         }
-        let list = NSGridView(views: [[column(tr("Keyboard", "แป้นพิมพ์")), column(tr("Colour", "สี")), NSGridCell.emptyContentView,
+        let list = NSGridView(views: [[column(tr("Keyboard", "แป้นพิมพ์")), column(tr("Color", "สี")), NSGridCell.emptyContentView,
                                        column(tr("Show badge", "แสดงป้าย"))]] + rows)
         list.column(at: 3).xPlacement = .center
         list.row(at: 0).bottomPadding = -2
@@ -1629,7 +1630,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         let mode = Settings.fixMode
         let modes: [(FixMode, String)] = [
             (.off, tr("Nothing is fixed, and CursorLingo doesn't look at your typing at all.", "ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย")),
-            (.manual, tr("Tap Shift twice to convert the word before the cursor, or the selected text.",
+            (.manual, tr("Tap Shift twice to switch the last word (or the selected text) to the other language.",
                          "พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้")),
             (.automatic, tr("Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
                             "แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน")),
@@ -1770,7 +1771,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             ("⌃⌥ =   ⌃⌥ −", tr("Zoom in / out", "ซูมเข้า / ออก")),
             ("⌘Z", tr("Take back the last stroke", "ลบเส้นที่วาดล่าสุด")),
             ("Esc", tr("Stop drawing; press again to turn everything off", "เลิกวาด กดอีกครั้งเพื่อปิดทั้งหมด")),
-            (tr("Click", "คลิก"), tr("A ring in the colour of the language in use", "มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")),
+            (tr("Click", "คลิก"), tr("A ring in the color of the language in use", "มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")),
         ]
         let legend = NSGridView(views: keys.map { [keycap($0.0), label($0.1)] })
         legend.rowSpacing = 6
@@ -2030,13 +2031,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private func keycap(_ text: String) -> NSView {
         let l = NSTextField(labelWithString: text)
         l.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-        let box = NSStackView(views: [l])
+        let box = KeycapBox(views: [l])
         box.edgeInsets = NSEdgeInsets(top: 2, left: 7, bottom: 2, right: 7)
-        box.wantsLayer = true
-        box.layer?.cornerRadius = 5
-        box.layer?.borderWidth = 1
-        box.layer?.borderColor = NSColor.separatorColor.cgColor
-        box.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
         let cell = NSStackView(views: [box])  // left-aligned in its column
         cell.widthAnchor.constraint(equalToConstant: 104).isActive = true
         cell.alignment = .centerY
@@ -2154,6 +2150,28 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 }
 
 /// Toolbar tabs, with the window resized to fit the tab that is showing.
+/// A key's outline in the Presentation tab's legend. Layer colours are fixed values, so they are worked out again
+/// for the view's own light or dark appearance.
+final class KeycapBox: NSStackView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyColors()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColors()
+    }
+    private func applyColors() {
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        layer?.borderWidth = 1
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.tertiaryLabelColor.cgColor
+            layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
+        }
+    }
+}
+
 final class SettingsTabs: NSTabViewController {
     override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
         super.tabView(tabView, didSelect: item)

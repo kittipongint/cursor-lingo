@@ -2167,7 +2167,7 @@ static void BuildBadgeTab(Page& p) {
                  L"แป้นพิมพ์ที่เพิ่มไว้ใน Settings ของ Windows \u2192 Time & language \u2192 Language & region"));
     p.y += 10;
     p.Text(TR(L"Keyboard", L"แป้นพิมพ์"), Page::L, p.y, 240, g_fontBold);
-    p.Text(TR(L"Colour", L"สี"), 270, p.y, 120, g_fontBold);
+    p.Text(TR(L"Color", L"สี"), 270, p.y, 120, g_fontBold);
     p.Text(TR(L"Show badge", L"แสดงป้าย"), 410, p.y, 90, g_fontBold);
     p.y += 24;
     for (size_t i = 0; i < g_langRows.size(); i++) {
@@ -2282,7 +2282,7 @@ static void BuildPresentTab(Page& p) {
         {L"Ctrl+Alt+= / \u2212", TR(L"Zoom in / out", L"ซูมเข้า / ออก")},
         {L"Ctrl+Z", TR(L"Take back the last stroke", L"ลบเส้นที่วาดล่าสุด")},
         {L"Esc", TR(L"Stop drawing; press again to turn everything off", L"เลิกวาด กดอีกครั้งเพื่อปิดทั้งหมด")},
-        {TR(L"Click", L"คลิก"), TR(L"A ring in the colour of the language in use", L"มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")},
+        {TR(L"Click", L"คลิก"), TR(L"A ring in the color of the language in use", L"มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")},
     };
     for (auto& l : legend) {
         int h = std::max(p.Text(l[0], Page::L, p.y, 180, g_fontBold), p.Text(l[1], 210, p.y, 290, g_fontText));
