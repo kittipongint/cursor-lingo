@@ -3277,6 +3277,30 @@ static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
+// The settings file only grows by a line at a time, but it can be edited, or damaged. Windows reads the whole file
+// for every setting it gets or writes, so a huge one would make each save slow. When it is far bigger than anything
+// the app writes, write it again from what was read: the settings, colours and app layouts, all within their limits.
+static void TidyIni() {
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExW(g_ini, GetFileExInfoStandard, &fa) || (fa.nFileSizeHigh == 0 && fa.nFileSizeLow < 64 * 1024)) return;
+    FindAppLanguage(L"");  // reads the app layouts (up to 256) before the file goes
+    wchar_t old[MAX_PATH + 4];
+    swprintf(old, MAX_PATH + 4, L"%ls.old", g_ini);
+    if (!MoveFileExW(g_ini, old, MOVEFILE_REPLACE_EXISTING)) return;
+    SaveSettings();
+    for (int i = 0; i < g_colorCount; i++) {
+        wchar_t hex[8];
+        swprintf(hex, 8, L"%02X%02X%02X", GetRValue(g_colors[i].c), GetGValue(g_colors[i].c), GetBValue(g_colors[i].c));
+        WritePrivateProfileStringW(L"Colors", g_colors[i].code, hex, g_ini);
+    }
+    for (int i = 0; i < g_appLangCount; i++) {
+        wchar_t v[24];
+        swprintf(v, 24, L"%llx", (unsigned long long)(UINT_PTR)g_appLangs[i].hkl);
+        WritePrivateProfileStringW(L"AppLanguages", g_appLangs[i].exe, v, g_ini);
+    }
+    DeleteFileW(old);
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\CursorLingo.SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
@@ -3289,6 +3313,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     FindSettingsFiles();
     MigrateFromRegistry();
     LoadSettings();
+    TidyIni();
 
     WNDCLASSW wc = {};
     wc.hInstance = inst;
