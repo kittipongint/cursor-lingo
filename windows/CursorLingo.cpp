@@ -2041,7 +2041,7 @@ static void ReadLanguages() {
     }
 }
 
-// "1.1.5", from the exe's own version resource.
+// "1.2.0", from the exe's own version resource.
 static void AppVersion(wchar_t* out, int n) {
     wcscpy(out, L"?");
     HRSRC r = FindResourceW(nullptr, MAKEINTRESOURCEW(1), RT_VERSION);
