@@ -44,6 +44,11 @@
 - **Private.** No network, no telemetry. Keystrokes are only observed if you turn Auto-fix on, and then only the current and the last word are kept in memory, plus the personal word list you teach it with double Shift.
 - **Light on resources.** It's event-driven, with no polling timers on macOS.
 
+<p align="center">
+  <img src="assets/presentation-demo.gif" width="800" alt="Animated demo of the presentation tools: the spotlight dims a slide except for a circle with a turning rainbow ring around the pointer, the circle grows and shrinks with Control-Option and scroll, the zoom magnifies small print, red strokes circle +42% and point at a bar before Command-Z and Esc clear them, and clicks ripple green for English and blue for Thai">
+  <br><sub><a href="assets/presentation-demo.mp4">▶ Presentation tools in HD (MP4)</a></sub>
+</p>
+
 |                  | macOS                                  | Windows                                        |
 |------------------|----------------------------------------|------------------------------------------------|
 | Tech             | Swift + AppKit, single file            | C++ / Win32 + GDI, single file, static exe     |
@@ -231,10 +236,10 @@ macos/     CursorLingo.swift · Info.plist · build.sh (universal binary)
 windows/   CursorLingo.cpp · CursorLingo.rc · manifest · CMakeLists.txt · build.bat · CursorLingo.iss (installer) · msix/ (Microsoft Store package) · install.ps1
 tests/     layoutfix_test.cpp · cases.tsv (real-world fix / keep cases; add yours)
 assets/    AppIcon.png / .icns / .ico, screenshots
-tools/     make-icon.swift (vector icon generator) · make-demo.swift (README animation) · ai-icon.sh (optional AI icon) · gen-en-model.py
+tools/     make-icon.swift (vector icon generator) · make-demo.swift · make-presentation-demo.swift (README animations) · ai-icon.sh (optional AI icon) · gen-en-model.py
 ```
 
-The icon is drawn in code by `tools/make-icon.swift`, and the demo animation by `tools/make-demo.swift` (`swiftc -O tools/make-demo.swift -o /tmp/make-demo && /tmp/make-demo`). To try an AI-generated icon, run `OPENAI_API_KEY=… ./tools/ai-icon.sh`.
+The icon is drawn in code by `tools/make-icon.swift`, and the demo animations by `tools/make-demo.swift` and `tools/make-presentation-demo.swift` (for example `swiftc -O tools/make-demo.swift -o /tmp/make-demo && /tmp/make-demo`; run from the repository root). To try an AI-generated icon, run `OPENAI_API_KEY=… ./tools/ai-icon.sh`.
 
 ## Privacy
 
