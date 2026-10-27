@@ -6,14 +6,20 @@ how they were measured, and what is still to be measured.
 ## macOS
 
 Apple M5, macOS 27.0.1, release build (`./macos/build.sh`), measured 2026-10-28 with
-[`tests/perf/measure-macos.sh`](perf/measure-macos.sh). CPU is the share of one core over 20 s; memory is the
-physical footprint (`footprint`), which is what Activity Monitor calls Memory.
+[`tests/perf/measure-macos.sh`](perf/measure-macos.sh), run twice. CPU is the share of one core over 20 s; memory is
+the physical footprint (`footprint`), which is what Activity Monitor calls Memory. The script exports the
+preferences first and imports them back after (checked: the same, byte for byte), and asks for any other running
+CursorLingo (such as the one in /Applications) to be closed first:
+
+```bash
+tests/perf/measure-macos.sh [baseline|spotlight|moving|huge|garbage|tools ...]
+```
 
 | Case | CPU | Memory | Notes |
 |------|-----|--------|-------|
 | Idle, badge shown | 0.00–0.05 % | 15–16 MB | No timers: nothing runs until the language or the pointer changes. |
 | Spotlight on, pointer still | 0.00 % | 16 MB | The turning ring is a Core Animation layer; the system draws it. |
-| Pointer moving without a stop, 120 moves/s | ~5.5 % | 16 MB | Same with the spotlight on. A `sample` shows almost all of it is the system delivering mouse events. |
+| Pointer moving without a stop, 120 moves/s | 5.5–7.5 % | 16 MB | Same with the spotlight on. A `sample` shows the main thread waiting over 95 % of the time; nearly all of the rest is the system delivering mouse events (on Windows a low-level hook costs 0.2 %). |
 | 60 s of pointer movement | – | 16 MB before and after | No growth. `leaks` finds 19 KB, all in one system XPC connection (`LNDaemonApplicationInterface`), none in CursorLingo's code. |
 | 41–43 MB preferences file (see below), first launch | 0.05 % | 23–40 MB | No crash. The file is cleaned up and saved back: 44–46 KB. |
 | Same, next launch | 0.00 % | 15–16 MB | Back to normal. |
@@ -26,9 +32,28 @@ physical footprint (`footprint`), which is what Activity Monitor calls Memory.
 | Settings window open | – | 44–47 MB | Most of the extra 28 MB is AppKit's own: the toolbar tabs, pop-up buttons and switches are SwiftUI-backed on macOS 27. |
 | Settings closed and opened 12 times | – | 54–56 MB, level | The pages are emptied when the window closes and the number of controls stays the same; the rest is AppKit's caches, kept until CursorLingo quits. |
 
+`tools` in the script, every tool on and off through its shortcut (state after each step):
+
+| Step | Memory | Threads | Open files | Windows | CPU time used |
+|------|--------|---------|------------|---------|---------------|
+| At the start | 15 MB | 3 | 30 | 1 | |
+| Spotlight on and off ×60 | 16 MB | 12 | 30 | 5 | 0.6 s |
+| Zoom on and off ×60 | 17 MB | 12 | 30 | 5 | 1.1 s |
+| Drawing on and off ×60 | 17 MB | 10 | 30 | 5 | 0.5 s |
+| 300 click ripples | 17 MB | 11 | 30 | 5 | |
+| One stroke of 50,000 points, drawn over 65 s | 18 MB, peak 18 MB | 4 | 30 | 6 | 3.6 s (5.5 %) |
+| Drawing off | 18 MB | 9 | 30 | 5 | |
+
+No crash. Threads come and go with the system's work queues; open files stay at 30 and windows at 5–6 (the ripple
+and drawing windows are made on first use and kept).
+
 Zoom and drawing were measured with [`tests/perf/drive.swift`](perf/drive.swift), which presses the tools'
 shortcuts and moves or drags the pointer (`swiftc -O tests/perf/drive.swift -o /tmp/drive && /tmp/drive key ctrl+opt+z`,
-then `drive move 20`, `drive drag 20`, `drive key esc`). Zoom needs Screen Recording for the build being measured.
+then `drive move 20`, `drive drag 20`, `drive click 300`, `drive stroke 50000`, `drive key esc`). Zoom needs Screen
+Recording for the build being measured.
+
+Not measured on macOS: typing in another app with Auto-fix on, sleep and wake, plugging and unplugging a monitor,
+and a run of several hours.
 
 Found while measuring the Settings window: on macOS 27, AppKit keeps every view of a closed window alive (an
 observer from `-[NSView _commonAwake]` holds them), so making a new window each time it opens would add a full set
