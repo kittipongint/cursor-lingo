@@ -203,6 +203,10 @@ tools/     make-icon.swift (vector icon generator) · make-demo.swift (README an
 
 The icon is drawn in code by `tools/make-icon.swift`, and the demo animation by `tools/make-demo.swift` (`swiftc -O tools/make-demo.swift -o /tmp/make-demo && /tmp/make-demo`). To try an AI-generated icon, run `OPENAI_API_KEY=… ./tools/ai-icon.sh`.
 
+## Privacy
+
+CursorLingo collects nothing and makes no network connections. The full policy is in [PRIVACY.md](PRIVACY.md).
+
 ## Contributing
 
 Found a word that was fixed wrongly, or not fixed? That's the most useful report there is: use the [wrong-fix form](https://github.com/kittipongint/cursor-lingo/issues/new/choose), or add a line to [`tests/cases.tsv`](tests/cases.tsv) and open a pull request. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to test a word, build both apps, and the privacy rules every change follows. Security or privacy problems: see [SECURITY.md](SECURITY.md).

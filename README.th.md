@@ -196,6 +196,10 @@ windows\build.bat
 - **macOS:** รัน `./uninstall.sh` หรือปิดแอปแล้วลบทิ้ง ให้ปิด *Launch at Login* ก่อน
 - **Windows:** ถ้าใช้ตัวติดตั้ง ไปที่ **Settings → Apps → Installed apps → CursorLingo → Uninstall** (ลบค่าตั้งค่าให้ด้วย) ถ้าใช้แบบพกพา ให้ปิด *Start with Windows* ปิดแอป แล้วลบโฟลเดอร์ทิ้ง
 
+## ความเป็นส่วนตัว
+
+CursorLingo ไม่เก็บข้อมูลและไม่เชื่อมต่อเครือข่ายเลย อ่านนโยบายฉบับเต็มได้ที่ [PRIVACY.md](PRIVACY.md#นโยบายความเป็นส่วนตัวของ-cursorlingo)
+
 ## ร่วมพัฒนา
 
 เจอคำที่ระบบแก้ผิด หรือพิมพ์ผิดภาษาแล้วไม่แก้ให้? นี่คือรายงานที่มีประโยชน์ที่สุด แจ้งผ่าน[ฟอร์มแจ้งคำที่แก้ผิด](https://github.com/kittipongint/cursor-lingo/issues/new/choose) (เขียนภาษาไทยได้) หรือเพิ่มบรรทัดใน [`tests/cases.tsv`](tests/cases.tsv) แล้วเปิด pull request วิธีทดสอบคำ วิธี build และกติกาเรื่องความเป็นส่วนตัวอยู่ใน [CONTRIBUTING.md](CONTRIBUTING.md) ส่วนปัญหาด้านความปลอดภัยหรือความเป็นส่วนตัว ดู [SECURITY.md](SECURITY.md)
