@@ -1779,12 +1779,50 @@ enum {
     CTL_CAPTION = 2000, CTL_STATUS, CTL_PREVIEW, CTL_MODE, CTL_STYLE, CTL_SIZE, CTL_BORDER,
     CTL_FIX_BASE = 2100, CTL_EDITORS = 2110, CTL_FORGET, CTL_PER_APP,
     CTL_TOOL_BASE = 2200, CTL_KEY_BASE = 2210, CTL_RESTORE = 2220, CTL_RADIUS, CTL_ZOOM_LEVEL, CTL_RADIUS_VALUE, CTL_ZOOM_VALUE,
-    CTL_STARTUP = 2300, CTL_UI_LANG, CTL_REPORT, CTL_STAR, CTL_CONTRIBUTE,
+    CTL_STARTUP = 2300, CTL_UI_LANG, CTL_REPORT, CTL_STAR, CTL_CONTRIBUTE, CTL_KOFI, CTL_QR, CTL_COPY_NUMBER,
     CTL_COLOR_BASE = 2400, CTL_DEFAULT_BASE = 2500, CTL_SHOW_BASE = 2600, kMaxRows = 64,
 };
 #define WM_APP_RELOAD (WM_APP + 20)
 static const wchar_t* kTabNames[2][4] = {{L"Badge", L"Fix Wrong Language", L"Presentation", L"General"},
                                          {L"ป้ายภาษา", L"แก้คำผิดภาษา", L"นำเสนอ", L"ทั่วไป"}};
+
+// PromptPay, Thailand's bank transfer, for donations. The QR code is a static PromptPay QR (EMVCo) for this number
+// with no amount, so the payer types it in their banking app. Windows has no QR encoder, so the modules are kept
+// here ('#' = dark), made from the payload
+// 00020101021129370016A000000677010111011300668047828435802TH530376463045D5D
+// and checked by decoding them; make them again if the number changes.
+static const wchar_t kPromptPay[] = L"0804782843", kPromptPayShown[] = L"080-478-2843";
+static const char* const kPromptPayQr[] = {
+    "#######..#....#.#..#..#######",
+    "#.....#.##...##..#.#..#.....#",
+    "#.###.#...#...##..###.#.###.#",
+    "#.###.#...###.........#.###.#",
+    "#.###.#.#.####.####...#.###.#",
+    "#.....#..#...#.#..#...#.....#",
+    "#######.#.#.#.#.#.#.#.#######",
+    "...........#......#..........",
+    "#.#.#.#....####.#.......#..#.",
+    ".#.##..#.#....##...##..#####.",
+    "..###.#..##...####.##.#.#...#",
+    ".####..####.###..##..#.#.#.#.",
+    ".#.#.###.####.....#.#.####.##",
+    ".##.##.#...##.....##.#.#...##",
+    ".#.#.####..##.#.###...#...#.#",
+    "#.#..#.#....#.##.##.##.##.#.#",
+    ".##..###.#..#...#####.#.###.#",
+    ".#####...##..#.#..#.##...#.#.",
+    "#.#...#...####..#...#.#.#...#",
+    ".##.##.####.#......#.#.#...#.",
+    "#.######..##..#...#########.#",
+    "........###..#..#..##...####.",
+    "#######...#.#.#.#.###.#.#...#",
+    "#.....#....###.#...##...#.#..",
+    "#.###.#.#...#.###.#.######.##",
+    "#.###.#..##......#.#.#.#.#.#.",
+    "#.###.#.#.#.#######.#...#.#.#",
+    "#.....#...#.##.###...##..##..",
+    "#######.#.#.##...####...#.#.#",
+};
 
 static HWND g_setWnd, g_setTabs, g_setPage;
 static int g_setTab = TAB_BADGE;
@@ -2005,8 +2043,8 @@ static void BuildBadgeTab(Page& p) {
     p.y += 128 + 22;
 
     p.Header(TR(L"Languages", L"ภาษา"));
-    p.Caption(TR(L"The keyboards added in Windows Settings → Time & language → Language & region.",
-                 L"แป้นพิมพ์ที่เพิ่มไว้ใน Settings ของ Windows → Time & language → Language & region"));
+    p.Caption(TR(L"The keyboards added in Windows Settings \u2192 Time & language \u2192 Language & region.",
+                 L"แป้นพิมพ์ที่เพิ่มไว้ใน Settings ของ Windows \u2192 Time & language \u2192 Language & region"));
     p.y += 10;
     p.Text(TR(L"Keyboard", L"แป้นพิมพ์"), Page::L, p.y, 240, g_fontBold);
     p.Text(TR(L"Colour", L"สี"), 270, p.y, 120, g_fontBold);
@@ -2028,7 +2066,7 @@ static void BuildBadgeTab(Page& p) {
 static void BuildFixTab(Page& p) {
     const int th = UiThai();
     const int mode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
-    p.Header(TR(L"Fix Wrong Language (EN ⇄ TH)", L"แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"));
+    p.Header(TR(L"Fix Wrong Language (EN \u21C4 TH)", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH)"));
     const wchar_t* details[3] = {
         TR(L"Nothing is fixed, and CursorLingo doesn't look at your typing at all.", L"ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย"),
         TR(L"Tap Shift twice to switch the last word (or the selected text) to the other language.",
@@ -2121,7 +2159,7 @@ static void BuildPresentTab(Page& p) {
     p.y += 4;
     const wchar_t* legend[][2] = {
         {TR(L"Ctrl+Alt + wheel", L"Ctrl+Alt + ล้อเมาส์"), TR(L"Resize the circle", L"ปรับขนาดวง")},
-        {L"Ctrl+Alt+=   Ctrl+Alt+−", TR(L"Zoom in / out", L"ซูมเข้า / ออก")},
+        {L"Ctrl+Alt+=   Ctrl+Alt+\u2212", TR(L"Zoom in / out", L"ซูมเข้า / ออก")},
         {L"Ctrl+Z", TR(L"Take back the last stroke", L"ลบเส้นที่วาดล่าสุด")},
         {L"Esc", TR(L"Stop drawing; press again to turn everything off", L"เลิกวาด กดอีกครั้งเพื่อปิดทั้งหมด")},
         {TR(L"Click", L"คลิก"), TR(L"A ring in the colour of the language in use", L"มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")},
@@ -2138,8 +2176,8 @@ static void BuildGeneralTab(Page& p) {
     SendMessageW(icon, STM_SETICON, (WPARAM)LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, p.Px(48), p.Px(48), LR_SHARED), 0);
     wchar_t version[16], about[160];
     AppVersion(version, 16);
-    swprintf(about, 160, TR(L"Version %ls · Free and open source · No network access, no tracking",
-                            L"เวอร์ชัน %ls · ฟรีและโอเพนซอร์ส · ไม่ต่อเน็ต ไม่เก็บข้อมูลการใช้งาน"),
+    swprintf(about, 160, TR(L"Version %ls \u00B7 Free and open source \u00B7 No network access, no tracking",
+                            L"เวอร์ชัน %ls \u00B7 ฟรีและโอเพนซอร์ส \u00B7 ไม่ต่อเน็ต ไม่เก็บข้อมูลการใช้งาน"),
              version);
     int top = p.y + 4;
     top += p.Text(kAppName, 84, top, 416, g_fontHead) + 2;
@@ -2150,9 +2188,9 @@ static void BuildGeneralTab(Page& p) {
     if (IsPackaged()) {  // switched in Windows Settings; the app cannot tell whether it is on
         p.Action(TR(L"Open CursorLingo automatically", L"เปิด CursorLingo อัตโนมัติ"),
                  TR(L"Installed from the Microsoft Store, so Windows looks after this: switch CursorLingo on under Settings "
-                    L"→ Apps → Startup.",
-                    L"ติดตั้งจาก Microsoft Store เรื่องนี้ Windows เป็นคนดูแล เปิดได้ที่ Settings → Apps → Startup"),
-                 TR(L"Startup apps…", L"เปิด Startup apps…"), CTL_STARTUP);
+                    L"\u2192 Apps \u2192 Startup.",
+                    L"ติดตั้งจาก Microsoft Store เรื่องนี้ Windows เป็นคนดูแล เปิดได้ที่ Settings \u2192 Apps \u2192 Startup"),
+                 TR(L"Startup apps\u2026", L"เปิด Startup apps\u2026"), CTL_STARTUP);
     } else {
         p.Option(TR(L"Open CursorLingo automatically", L"เปิด CursorLingo อัตโนมัติ"),
                  TR(L"Starts by itself when you sign in to Windows, so the badge is always there.",
@@ -2169,18 +2207,31 @@ static void BuildGeneralTab(Page& p) {
     p.Action(TR(L"Found a wrong fix or a bug?", L"เจอคำที่แก้ผิด หรือเจอบั๊ก?"),
              TR(L"Opens the report form on GitHub in your browser. Nothing you typed is attached.",
                 L"จะเปิดหน้าแจ้งปัญหาบน GitHub ในเบราว์เซอร์ ไม่มีอะไรที่คุณพิมพ์ติดไปด้วย"),
-             TR(L"Report…", L"แจ้งปัญหา…"), CTL_REPORT);
+             TR(L"Report\u2026", L"แจ้งปัญหา\u2026"), CTL_REPORT);
     p.Separator();
 
     p.Header(TR(L"Support CursorLingo", L"สนับสนุน CursorLingo"));
-    p.Caption(TR(L"CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub or a share with "
-                 L"friends means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
+    p.Caption(TR(L"CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub, a share with "
+                 L"friends or a coffee means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
                  L"CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ ฝากกดดาวบน GitHub "
-                 L"หรือแชร์ให้เพื่อนๆ หน่อยนะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"));
+                 L"แชร์ให้เพื่อนๆ หรือเลี้ยงกาแฟสักแก้วก็ได้นะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"));
     p.y += 10;
-    p.Add(L"BUTTON", TR(L"★ Star on GitHub", L"★ ให้ดาวบน GitHub"), WS_TABSTOP, Page::L, p.y, 170, 30, CTL_STAR);
-    p.Add(L"BUTTON", TR(L"How to contribute", L"วิธีร่วมพัฒนา"), WS_TABSTOP, Page::L + 180, p.y, 150, 30, CTL_CONTRIBUTE);
-    p.y += 30;
+    p.Add(L"BUTTON", TR(L"\u2605 Star on GitHub", L"\u2605 ให้ดาวบน GitHub"), WS_TABSTOP, Page::L, p.y, 150, 30, CTL_STAR);
+    p.Add(L"BUTTON", TR(L"How to contribute", L"วิธีร่วมพัฒนา"), WS_TABSTOP, Page::L + 160, p.y, 130, 30, CTL_CONTRIBUTE);
+    p.Add(L"BUTTON", TR(L"\u2615 Buy a coffee on Ko-fi", L"\u2615 เลี้ยงกาแฟผ่าน Ko-fi"), WS_TABSTOP, Page::L + 300, p.y, 180, 30,
+          CTL_KOFI);
+    p.y += 30 + 14;
+
+    // PromptPay: the QR code on white (it must stay dark on light to scan), the number and a copy button.
+    const int qrTop = p.y, x = Page::L + 132, w = Page::W - 132;
+    p.Add(L"STATIC", L"", SS_OWNERDRAW, Page::L, p.y, 116, 116, CTL_QR);
+    p.y += p.Text(TR(L"PromptPay (Thailand)", L"พร้อมเพย์ (PromptPay)"), x, p.y, w, g_fontBold) + 2;
+    p.y += p.Text(kPromptPayShown, x, p.y, w, g_fontHead) + 4;
+    p.Caption(TR(L"Scan with a Thai banking app and type any amount, or copy the number.",
+                 L"สแกนด้วยแอปธนาคาร แล้วใส่จำนวนเงินเท่าไหร่ก็ได้ หรือคัดลอกเลขไปโอนก็ได้"), x, w);
+    p.y += 8;
+    p.Add(L"BUTTON", TR(L"Copy number", L"คัดลอกเลข"), WS_TABSTOP, x, p.y, 120, 28, CTL_COPY_NUMBER);
+    p.y = std::max(p.y + 28, qrTop + 116);
 }
 
 static void ShowSliderValues() {
@@ -2189,7 +2240,7 @@ static void ShowSliderValues() {
     swprintf(text, 32, TR(L"%d pt", L"%d พอยต์"), r);
     SetDlgItemTextW(g_setPage, CTL_RADIUS_VALUE, text);
     int z = (int)SendDlgItemMessageW(g_setPage, CTL_ZOOM_LEVEL, TBM_GETPOS, 0, 0);
-    swprintf(text, 32, L"%d.%d×", z / 10, z % 10);
+    swprintf(text, 32, L"%d.%d\u00D7", z / 10, z % 10);
     SetDlgItemTextW(g_setPage, CTL_ZOOM_VALUE, text);
 }
 
@@ -2270,6 +2321,42 @@ static void DrawPreview(HDC dc, RECT r) {
         AlphaBlend(canvas.dc, cx + (int)(14 * s) - pad, cy + (int)(20 * s) - pad, badge.w, badge.h, badge.dc, 0, 0, badge.w, badge.h, bf);
     }
     BitBlt(dc, r.left, r.top, w, h, canvas.dc, 0, 0, SRCCOPY);
+}
+
+// The PromptPay QR code: whole pixels per module, centred on a white card with a quiet zone round it.
+static void DrawPromptPayQr(HDC dc, RECT r) {
+    FillRect(dc, &r, GetSysColorBrush(COLOR_WINDOW));
+    const int n = (int)(sizeof(kPromptPayQr) / sizeof(kPromptPayQr[0])), side = std::min(r.right - r.left, r.bottom - r.top);
+    const int module = std::max(1, side / (n + 4)), size = module * n;
+    HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
+    HGDIOBJ oldBrush = SelectObject(dc, white), oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    const int round = MulDiv(10, (int)g_setDpi, 96);
+    RoundRect(dc, r.left, r.top, r.left + side + 1, r.top + side + 1, round, round);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(white);
+    const int x0 = r.left + (side - size) / 2, y0 = r.top + (side - size) / 2;
+    HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++)
+            if (kPromptPayQr[y][x] == '#') {
+                RECT m = {x0 + x * module, y0 + y * module, x0 + (x + 1) * module, y0 + (y + 1) * module};
+                FillRect(dc, &m, black);
+            }
+}
+
+// Puts the PromptPay number on the clipboard, as the user asked; the button says so for a moment.
+static void CopyPromptPay(HWND button) {
+    if (!OpenClipboard(g_setWnd)) return;
+    EmptyClipboard();
+    if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(kPromptPay))) {
+        memcpy(GlobalLock(mem), kPromptPay, sizeof(kPromptPay));
+        GlobalUnlock(mem);
+        if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+    }
+    CloseClipboard();
+    SetWindowTextW(button, TR(L"Copied \u2713", L"คัดลอกแล้ว \u2713"));
+    SetTimer(g_setPage, 1, 1500, nullptr);
 }
 
 static void DrawSwatch(const DRAWITEMSTRUCT* d, const wchar_t* code) {
@@ -2420,6 +2507,10 @@ static void PageCommand(int id, int code, HWND ctl) {
         OpenUrl(L"https://github.com/kittipongint/cursor-lingo");
     } else if (id == CTL_CONTRIBUTE) {
         OpenUrl(L"https://github.com/kittipongint/cursor-lingo/blob/main/CONTRIBUTING.md");
+    } else if (id == CTL_KOFI) {
+        OpenUrl(L"https://ko-fi.com/kintstudio");
+    } else if (id == CTL_COPY_NUMBER) {
+        CopyPromptPay(ctl);
     }
 }
 
@@ -2437,6 +2528,7 @@ static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DRAWITEM: {
             const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
             if (d->CtlID == CTL_PREVIEW) DrawPreview(d->hDC, d->rcItem);
+            else if (d->CtlID == CTL_QR) DrawPromptPayQr(d->hDC, d->rcItem);
             else if (d->CtlID >= CTL_COLOR_BASE && d->CtlID < CTL_COLOR_BASE + g_langRows.size())
                 DrawSwatch(d, g_langRows[d->CtlID - CTL_COLOR_BASE].code);
             return TRUE;
@@ -2459,6 +2551,10 @@ static LRESULT CALLBACK PageProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_COMMAND:
             PageCommand(LOWORD(wp), HIWORD(wp), (HWND)lp);
+            return 0;
+        case WM_TIMER:  // "Copied" has been shown long enough
+            KillTimer(h, wp);
+            SetDlgItemTextW(h, CTL_COPY_NUMBER, TR(L"Copy number", L"คัดลอกเลข"));
             return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -2569,19 +2665,19 @@ static void ShowMenu() {
     }
     AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt + wheel: resize the circle", L"Ctrl+Alt + ล้อเมาส์: ปรับขนาดวง"));
-    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt+= / −: zoom in / out", L"Ctrl+Alt+= / −: ซูมเข้า / ออก"));
+    AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Alt+= / \u2212: zoom in / out", L"Ctrl+Alt+= / \u2212: ซูมเข้า / ออก"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Ctrl+Z: undo last stroke", L"Ctrl+Z: ลบเส้นล่าสุด"));
     AppendMenuW(present, MF_STRING | MF_GRAYED, 0, TR(L"Esc: stop drawing, then exit", L"Esc: เลิกวาด กดอีกครั้งเพื่อออก"));
     AppendMenuW(present, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(present, MF_STRING, ID_SHORTCUTS, TR(L"Shortcuts…", L"ตั้งคีย์ลัด…"));
+    AppendMenuW(present, MF_STRING, ID_SHORTCUTS, TR(L"Shortcuts\u2026", L"ตั้งคีย์ลัด\u2026"));
     AppendMenuW(m, MF_POPUP | (CircleOn() || g_drawing ? MF_CHECKED : 0), (UINT_PTR)present, TR(L"Presentation", L"นำเสนอ"));
     const int fixMode = !g_set.autoFix ? 0 : g_set.fixAsYouType ? 2 : 1;
     for (int i = 0; i < 3; i++) AppendMenuW(fix, MF_STRING | (fixMode == i ? MF_CHECKED : 0), ID_FIX_BASE + i, kFixNames[th][i]);
     wchar_t fixTitle[96];
-    swprintf(fixTitle, 96, TR(L"Fix wrong language (EN ⇄ TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): %ls"), kFixNames[th][fixMode]);
+    swprintf(fixTitle, 96, TR(L"Fix wrong language (EN \u21C4 TH): %ls", L"แก้คำที่พิมพ์ผิดภาษา (EN \u21C4 TH): %ls"), kFixNames[th][fixMode]);
     AppendMenuW(m, MF_POPUP, (UINT_PTR)fix, fixTitle);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_SETTINGS, TR(L"Settings…", L"ตั้งค่า…"));
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, TR(L"Settings\u2026", L"ตั้งค่า\u2026"));
     AppendMenuW(m, MF_STRING, ID_QUIT, TR(L"Quit CursorLingo", L"ปิด CursorLingo"));
 
     POINT pt;

@@ -224,6 +224,17 @@ CursorLingo collects nothing and makes no network connections. The full policy i
 
 Found a word that was fixed wrongly, or not fixed? That's the most useful report there is: use the [wrong-fix form](https://github.com/kittipongint/cursor-lingo/issues/new/choose), or add a line to [`tests/cases.tsv`](tests/cases.tsv) and open a pull request. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to test a word, build both apps, and the privacy rules every change follows. Security or privacy problems: see [SECURITY.md](SECURITY.md).
 
+## Support
+
+CursorLingo is free and made in spare time. If it helps you, a ⭐ on GitHub, a share with friends, or a coffee keeps it going:
+
+- **Ko-fi:** [ko-fi.com/kintstudio](https://ko-fi.com/kintstudio)
+- **PromptPay (Thailand):** 080-478-2843, or scan the code with a Thai banking app and type any amount.
+
+<img src="assets/promptpay-qr.png" width="160" alt="PromptPay QR code for 080-478-2843">
+
+Both are also in the app, under **Settings → General**.
+
 ## Related projects
 
 - **[RightLang](http://blog.rightlang.com/)**, a long-standing Thai tool for fixing text typed in the wrong layout.

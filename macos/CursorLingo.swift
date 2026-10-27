@@ -10,6 +10,7 @@
 
 import AppKit
 import Carbon
+import CoreImage
 import ScreenCaptureKit
 import ServiceManagement
 
@@ -1429,6 +1430,38 @@ final class BadgePreview: NSView {
 }
 
 /// Settings in four tabs: Badge, Fix Wrong Language, Presentation and General. Every change applies at once.
+/// PromptPay, Thailand's bank transfer, for donations: the number, and the QR code that banking apps scan.
+enum PromptPay {
+    static let number = "0804782843"
+    static let display = "080-478-2843"
+
+    /// A static PromptPay QR (EMVCo) for `number` with no amount, so the payer types it in their banking app.
+    static var payload: String {
+        func field(_ id: String, _ value: String) -> String { id + String(format: "%02d", value.count) + value }
+        let target = "0066" + number.dropFirst()  // a phone number, in international form
+        let body = field("00", "01") + field("01", "11") + field("29", field("00", "A000000677010111") + field("01", target))
+            + field("58", "TH") + field("53", "764") + "6304"
+        var crc: UInt16 = 0xFFFF  // CRC-16/CCITT-FALSE over everything before it, its own tag included
+        for byte in body.utf8 {
+            crc ^= UInt16(byte) << 8
+            for _ in 0..<8 { crc = crc & 0x8000 != 0 ? (crc << 1) ^ 0x1021 : crc << 1 }
+        }
+        return body + String(format: "%04X", crc)
+    }
+
+    /// The QR code, drawn with Core Image on this Mac: black on white, crisp at `side` points.
+    static func qrImage(side: CGFloat) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(payload.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let code = filter.outputImage else { return nil }
+        let scale = max(1, (side * 2 / code.extent.width).rounded(.down))
+        let big = code.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        guard let cg = CIContext().createCGImage(big, from: big.extent) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: side, height: side))
+    }
+}
+
 final class SettingsWindow: NSObject, NSWindowDelegate {
     enum Tab: Int { case badge, fix, presentation, general }
 
@@ -1766,15 +1799,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         let top = NSStackView(views: [icon, about])
         top.spacing = 12
 
-        let pitch = caption(tr("CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub or a "
-                               + "share with friends means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
+        let pitch = caption(tr("CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub, a "
+                               + "share with friends or a coffee means a lot. Got an idea, a word it got wrong, or some code? "
+                               + "Come say hi.",
                                "CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ "
-                               + "ฝากกดดาวบน GitHub หรือแชร์ให้เพื่อนๆ หน่อยนะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"))
+                               + "ฝากกดดาวบน GitHub แชร์ให้เพื่อนๆ หรือเลี้ยงกาแฟสักแก้วก็ได้นะ "
+                               + "มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"))
         let support = NSStackView(views: [
             header(tr("Support CursorLingo", "สนับสนุน CursorLingo")),
             pitch,
             line(NSButton(title: tr("★ Star on GitHub", "★ ให้ดาวบน GitHub"), target: self, action: #selector(openRepo)),
-                 NSButton(title: tr("How to Contribute", "วิธีร่วมพัฒนา"), target: self, action: #selector(openContributing))),
+                 NSButton(title: tr("How to Contribute", "วิธีร่วมพัฒนา"), target: self, action: #selector(openContributing)),
+                 NSButton(title: tr("☕ Buy a Coffee on Ko-fi", "☕ เลี้ยงกาแฟผ่าน Ko-fi"), target: self, action: #selector(openKofi))),
+            promptPayBox(),
         ])
         support.orientation = .vertical
         support.alignment = .leading
@@ -1811,6 +1848,15 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     }
     @objc private func openRepo() {
         if let url = URL(string: "https://github.com/kittipongint/cursor-lingo") { NSWorkspace.shared.open(url) }
+    }
+    @objc private func openKofi() {
+        if let url = URL(string: "https://ko-fi.com/kintstudio") { NSWorkspace.shared.open(url) }
+    }
+    @objc private func copyPromptPay(_ sender: NSButton) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(PromptPay.number, forType: .string)
+        sender.title = tr("Copied ✓", "คัดลอกแล้ว ✓")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { sender.title = tr("Copy Number", "คัดลอกเลข") }
     }
     @objc private func openContributing() {
         if let url = URL(string: "https://github.com/kittipongint/cursor-lingo/blob/main/CONTRIBUTING.md") { NSWorkspace.shared.open(url) }
@@ -2009,6 +2055,34 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         let s = NSStackView(views: [view])
         s.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
         return s
+    }
+
+    /// PromptPay: the QR code on white (it must stay dark on light to scan), the number and a copy button.
+    private func promptPayBox() -> NSView {
+        let qr = NSImageView()
+        qr.image = PromptPay.qrImage(side: 104)
+        qr.imageScaling = .scaleNone
+        qr.wantsLayer = true
+        qr.layer?.backgroundColor = NSColor.white.cgColor
+        qr.layer?.cornerRadius = 6
+        for a in [qr.widthAnchor, qr.heightAnchor] { a.constraint(equalToConstant: 116).isActive = true }
+        let title = label(tr("PromptPay (Thailand)", "พร้อมเพย์ (PromptPay)"))
+        title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        let number = label(PromptPay.display)
+        number.font = .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
+        number.isSelectable = true
+        let copy = NSButton(title: tr("Copy Number", "คัดลอกเลข"), target: self, action: #selector(copyPromptPay(_:)))
+        let hint = caption(tr("Scan with a Thai banking app and type any amount, or copy the number.",
+                              "สแกนด้วยแอปธนาคาร แล้วใส่จำนวนเงินเท่าไหร่ก็ได้ หรือคัดลอกเลขไปโอนก็ได้"))
+        hint.preferredMaxLayoutWidth = 320
+        let text = NSStackView(views: [title, number, hint, copy])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 6
+        let box = NSStackView(views: [qr, text])
+        box.spacing = 16
+        box.alignment = .centerY
+        return box
     }
 
     /// Explanations: a grey clearly softer than the titles, in light and dark mode.
