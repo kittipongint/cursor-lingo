@@ -33,7 +33,7 @@ Everything stays on your device:
 
 ## Links
 
-*Report a wrong fix or bug…* opens CursorLingo's GitHub page in your web browser. Nothing from the app is attached; what you write there is governed by GitHub's privacy policy.
+*Report a wrong fix or bug…*, *Star on GitHub* and *How to contribute* (in Settings) open CursorLingo's GitHub pages in your web browser. Nothing from the app is attached; what you write there is governed by GitHub's privacy policy.
 
 ## Children
 
@@ -80,7 +80,7 @@ Changes to this policy are published in this file, in the project's public histo
 
 ## ลิงก์
 
-เมนู *แจ้งปัญหาหรือคำที่แก้ผิด…* จะเปิดหน้า GitHub ของ CursorLingo ในเว็บเบราว์เซอร์ โดยไม่แนบข้อมูลใดจากแอป สิ่งที่คุณเขียนบน GitHub อยู่ภายใต้นโยบายความเป็นส่วนตัวของ GitHub
+ปุ่ม *แจ้งปัญหา…* *ให้ดาวบน GitHub* และ *วิธีร่วมพัฒนา* (ในหน้าตั้งค่า) จะเปิดหน้า GitHub ของ CursorLingo ในเว็บเบราว์เซอร์ โดยไม่แนบข้อมูลใดจากแอป สิ่งที่คุณเขียนบน GitHub อยู่ภายใต้นโยบายความเป็นส่วนตัวของ GitHub
 
 ## เด็ก
 

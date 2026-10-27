@@ -137,6 +137,16 @@ struct Settings {
         get { d.dictionary(forKey: "appLanguages") as? [String: String] ?? [:] }
         set { d.set(newValue, forKey: "appLanguages") }
     }
+    /// The thin outline around the badge. On by default.
+    static var badgeBorder: Bool {
+        get { d.object(forKey: "badgeBorder") as? Bool ?? true }
+        set { d.set(newValue, forKey: "badgeBorder") }
+    }
+    /// Badge colours picked in Settings: language code -> "#RRGGBB".
+    static var badgeColors: [String: String] {
+        get { d.dictionary(forKey: "badgeColors") as? [String: String] ?? [:] }
+        set { d.set(newValue, forKey: "badgeColors") }
+    }
     /// Language codes (e.g. "EN") for which the badge is hidden.
     static var hidden: Set<String> {
         get { Set(d.stringArray(forKey: "hidden") ?? []) }
@@ -150,7 +160,10 @@ enum InputSource {
     /// Short uppercase code for the selected keyboard input source, e.g. "EN", "TH", "JA".
     static func currentCode() -> String {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return "??" }
+        return code(of: source)
+    }
 
+    static func code(of source: TISInputSource) -> String {
         if let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
            let langs = Unmanaged<CFArray>.fromOpaque(raw).takeUnretainedValue() as? [String],
            let first = langs.first, !first.isEmpty {
@@ -162,6 +175,27 @@ enum InputSource {
             if id.localizedCaseInsensitiveContains("thai") { return "TH" }
         }
         return "??"
+    }
+
+    /// The keyboards added in System Settings, as badge codes with the names of the layouts behind each one.
+    static func installedLanguages() -> [(code: String, layouts: [String])] {
+        let filter = [kTISPropertyInputSourceCategory as String: kTISCategoryKeyboardInputSource as String,
+                      kTISPropertyInputSourceIsSelectCapable as String: true] as CFDictionary
+        guard let list = TISCreateInputSourceList(filter, false)?.takeRetainedValue() as? [TISInputSource] else { return [] }
+        var out: [(code: String, layouts: [String])] = []
+        for source in list {
+            let code = code(of: source)
+            var name = code
+            if let raw = TISGetInputSourceProperty(source, kTISPropertyLocalizedName) {
+                name = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+            }
+            if let i = out.firstIndex(where: { $0.code == code }) {
+                if !out[i].layouts.contains(name) { out[i].layouts.append(name) }
+            } else {
+                out.append((code, [name]))
+            }
+        }
+        return out
     }
 }
 
@@ -202,6 +236,19 @@ extension InputSource {
 
 // MARK: - Palette
 
+extension NSColor {
+    /// "#RRGGBB" in sRGB.
+    var hex: String {
+        let c = usingColorSpace(.sRGB) ?? self
+        let v = [c.redComponent, c.greenComponent, c.blueComponent].map { Int(($0 * 255).rounded()) }
+        return String(format: "#%02X%02X%02X", v[0], v[1], v[2])
+    }
+    convenience init?(hex: String) {
+        guard hex.hasPrefix("#"), hex.count == 7, let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        self.init(srgbRed: CGFloat(v >> 16 & 0xFF) / 255, green: CGFloat(v >> 8 & 0xFF) / 255, blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
+}
+
 enum Palette {
     private static let known: [String: NSColor] = [
         "EN": NSColor(srgbRed: 0.20, green: 0.68, blue: 0.40, alpha: 1),
@@ -214,7 +261,18 @@ enum Palette {
         "??": NSColor.systemGray,
     ]
 
+    /// The colour picked in Settings, or the built-in one.
     static func color(for code: String) -> NSColor {
+        Settings.badgeColors[code].flatMap(NSColor.init(hex:)) ?? defaultColor(for: code)
+    }
+    static func hasCustomColor(for code: String) -> Bool { Settings.badgeColors[code] != nil }
+    static func setColor(_ color: NSColor?, for code: String) {
+        var colors = Settings.badgeColors
+        colors[code] = color?.hex
+        Settings.badgeColors = colors
+    }
+
+    static func defaultColor(for code: String) -> NSColor {
         if let c = known[code] { return c }
         // Stable hue for any other language.
         let hash = code.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value }
@@ -246,8 +304,10 @@ final class BadgeView: NSView {
 
         if style == .dot {
             let r = b.insetBy(dx: 1.5 * scale, dy: 1.5 * scale)
-            NSColor.white.withAlphaComponent(0.9).setFill()
-            NSBezierPath(ovalIn: r.insetBy(dx: -1, dy: -1)).fill()
+            if Settings.badgeBorder {
+                NSColor.white.withAlphaComponent(0.9).setFill()
+                NSBezierPath(ovalIn: r.insetBy(dx: -1, dy: -1)).fill()
+            }
             accent.setFill()
             NSBezierPath(ovalIn: r).fill()
             return
@@ -264,10 +324,12 @@ final class BadgeView: NSView {
         fill.setFill()
         pill.fill()
 
-        // Hairline border keeps the badge readable on any background.
-        (style == .dark ? accent : NSColor.black.withAlphaComponent(0.18)).setStroke()
-        pill.lineWidth = style == .dark ? 1 : 0.5
-        pill.stroke()
+        // Hairline border keeps the badge readable on any background (unless turned off in Settings).
+        if Settings.badgeBorder {
+            (style == .dark ? accent : NSColor.black.withAlphaComponent(0.18)).setStroke()
+            pill.lineWidth = style == .dark ? 1 : 0.5
+            pill.stroke()
+        }
 
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 10 * scale, weight: .bold),
@@ -300,6 +362,10 @@ final class AutoFix {
         "com.sublimetext.3", "com.panic.Nova", "com.google.android.studio", "org.vim.MacVim",
     ]
     private static func isCodeEditor(_ id: String) -> Bool { codeEditors.contains(id) || id.hasPrefix("com.jetbrains.") }
+    /// The apps above by name, for Settings (keep in step with `codeEditors` and `terminals`).
+    static let codeEditorNames = "VS Code, VSCodium, Cursor, Windsurf, Zed, Xcode, Sublime Text, Nova, Android Studio, MacVim, "
+        + "JetBrains IDEs (IntelliJ IDEA, PyCharm, WebStorm…)"
+    static let terminalNames = "Terminal, iTerm2, Ghostty, Alacritty, WezTerm, kitty, Warp, Hyper"
 
     /// Fix words by themselves; when false only double Shift converts.
     var fixAsYouType = true
@@ -1313,110 +1379,719 @@ final class ShortcutField: NSView {
     }
 }
 
-/// The Shortcuts window: one box per presentation tool, plus Restore Defaults.
-final class ShortcutsWindow: NSObject, NSWindowDelegate {
-    /// Registers the shortcuts as saved; returns the tools whose shortcut another app already has.
-    var apply: (() -> [PresentTool])?
-    /// Pauses (true) or restores (false) the app's shortcuts while a box listens.
-    var pause: ((Bool) -> Void)?
-    private var window: NSWindow?
-    private var fields: [PresentTool: ShortcutField] = [:]
-    private let status = NSTextField(labelWithString: "")
+// MARK: - Settings window
 
-    func show() {
-        if window?.isVisible != true { build() }  // rebuilt each time, in the menu's current language
+/// The badge as it looks next to the pointer, for the Settings window.
+final class BadgePreview: NSView {
+    private let badge = BadgeView(frame: .zero)
+    var code = "EN" { didSet { update() } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.borderWidth = 1
+        addSubview(badge)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 180).isActive = true
+        heightAnchor.constraint(equalToConstant: 128).isActive = true
+    }
+    required init?(coder: NSCoder) { nil }
+
+    /// Picks up the style, size and colour as they are now.
+    func update() {
+        badge.code = code
+        badge.style = Settings.style
+        badge.scale = Settings.size.scale
+        badge.needsDisplay = true
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    private var pointer: NSPoint { NSPoint(x: bounds.midX - 30, y: bounds.midY + 18) }
+
+    override func layout() {
+        super.layout()
+        // The same offset as the real badge (see AppDelegate.follow()).
+        let s = badge.scale, size = BadgeView.size(style: badge.style, scale: s, code: code)
+        badge.frame = NSRect(x: (pointer.x + 12 * s).rounded(), y: (pointer.y - 22 * s - size.height / 2).rounded(),
+                             width: size.width, height: size.height)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        layer?.borderColor = NSColor.separatorColor.cgColor
+        NSGradient(starting: NSColor(srgbRed: 0.33, green: 0.45, blue: 0.62, alpha: 1),
+                   ending: NSColor(srgbRed: 0.62, green: 0.50, blue: 0.70, alpha: 1))?.draw(in: bounds, angle: -30)
+        let arrow = NSCursor.arrow, image = arrow.image
+        image.draw(at: NSPoint(x: pointer.x - arrow.hotSpot.x, y: pointer.y - (image.size.height - arrow.hotSpot.y)),
+                   from: .zero, operation: .sourceOver, fraction: 1)
+    }
+}
+
+/// Settings in four tabs: Badge, Fix Wrong Language, Presentation and General. Every change applies at once.
+final class SettingsWindow: NSObject, NSWindowDelegate {
+    enum Tab: Int { case badge, fix, presentation, general }
+
+    weak var app: AppDelegate?
+    private var window: NSWindow?
+    private let tabs = SettingsTabs()
+    private let preview = BadgePreview()
+    private var previewCode: String?  // the language picked in the list; the current one until then
+    private var languages: [(code: String, layouts: [String])] = []
+    private var wells: [NSColorWell] = []
+    private var resets: [NSButton] = []
+    private var shortcutFields: [PresentTool: ShortcutField] = [:]
+    private let shortcutStatus = NSTextField(labelWithString: "")
+    private let radiusValue = NSTextField(labelWithString: "")
+    private let zoomValue = NSTextField(labelWithString: "")
+    private var reloadPending = false
+
+    func show(_ tab: Tab? = nil) {
+        if window == nil { makeWindow() }
+        build()
+        if let tab { tabs.selectedTabViewItemIndex = tab.rawValue }
+        tabs.fitWindow()
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
 
-    private func build() {
-        fields = [:]
-        let rows: [[NSView]] = PresentTool.allCases.enumerated().map { index, tool in
-            let field = ShortcutField()
-            field.shortcut = Settings.shortcut(tool)
-            field.onRecord = { [weak self] s in self?.set(tool, s) }
-            field.onListening = { [weak self] on in self?.pause?(on) }
-            fields[tool] = field
-            let clear = NSButton(title: tr("Clear", "ล้าง"), target: self, action: #selector(clear(_:)))
-            clear.tag = index
-            clear.controlSize = .small
-            return [NSTextField(labelWithString: tool.title), field, clear]
+    /// After a change made somewhere else (the menu, a shortcut): shows it, if the window is open.
+    func reload() {
+        guard window?.isVisible == true, !reloadPending else { return }
+        reloadPending = true
+        DispatchQueue.main.async { [weak self] in  // never inside the action of a control that is about to be replaced
+            guard let self else { return }
+            self.reloadPending = false
+            self.build()
         }
-        let grid = NSGridView(views: rows)
-        grid.rowSpacing = 10
-        grid.columnSpacing = 12
-        grid.rowAlignment = .lastBaseline
-        let note = NSTextField(wrappingLabelWithString: tr(
-            "Click a box and press the new keys: ⌃, ⌥ or ⌘ with a letter, number or F-key. Delete clears a box. Esc, ⌘Z and ⌃⌥ = / − stay as they are.",
-            "คลิกที่ช่องแล้วกดคีย์ใหม่ ต้องมี ⌃ ⌥ หรือ ⌘ คู่กับตัวอักษร ตัวเลข หรือปุ่ม F กด Delete เพื่อล้างช่อง ส่วน Esc, ⌘Z และ ⌃⌥ = / − ใช้ตามเดิม"))
-        note.textColor = .secondaryLabelColor
-        note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        note.preferredMaxLayoutWidth = 340
-        status.stringValue = ""
-        status.textColor = .systemRed
-        status.preferredMaxLayoutWidth = 340
-        status.lineBreakMode = .byWordWrapping
-        let restore = NSButton(title: tr("Restore Defaults", "คืนค่าเริ่มต้น"), target: self, action: #selector(restoreDefaults))
-        let stack = NSStackView(views: [grid, note, status, restore])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+    }
 
-        let w = window ?? NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        w.title = tr("CursorLingo Shortcuts", "คีย์ลัด CursorLingo")
+    /// The keyboard language changed: the preview follows it, unless a language was picked in the list.
+    func inputChanged() {
+        if previewCode == nil { preview.code = InputSource.currentCode() }
+    }
+
+    private func makeWindow() {
+        tabs.tabStyle = .toolbar
+        let symbols = ["character.cursor.ibeam", "keyboard", "cursorarrow.rays", "gearshape"]
+        for symbol in symbols {
+            let page = NSViewController()
+            page.view = NSView()  // stays for good; build() swaps what is inside, which the tab view shows at once
+            let item = NSTabViewItem(viewController: page)
+            item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            tabs.addTabViewItem(item)
+        }
+        let w = NSWindow(contentViewController: tabs)
+        w.styleMask = [.titled, .closable]
+        w.level = .floating  // stays above other windows, so changes can be tried out in the app underneath
         w.isReleasedWhenClosed = false
         w.delegate = self
-        w.contentView = stack
-        w.setContentSize(stack.fittingSize)
-        if window == nil { w.center() }
+        w.center()
         window = w
     }
 
-    private func set(_ tool: PresentTool, _ s: Shortcut?) {
+    /// Fills every tab in the menu's current language, keeping the selected one.
+    private func build() {
+        window?.makeFirstResponder(nil)  // a shortcut box still listening lets go first
+        let titles = [tr("Badge", "ป้ายภาษา"), tr("Fix Wrong Language", "แก้คำผิดภาษา"), tr("Presentation", "นำเสนอ"),
+                      tr("General", "ทั่วไป")]
+        let views = [badgeTab(), fixTab(), presentationTab(), generalTab()]
+        for (i, item) in tabs.tabViewItems.enumerated() {
+            item.label = titles[i]
+            item.viewController?.title = titles[i]  // the tab controller makes the page's title the window's title
+            guard let page = item.viewController?.view else { continue }
+            page.subviews = [views[i]]
+            views[i].translatesAutoresizingMaskIntoConstraints = false
+            // Only the top-left corner is pinned: the content keeps its own size, and the window is fitted to it.
+            NSLayoutConstraint.activate([
+                views[i].topAnchor.constraint(equalTo: page.topAnchor),
+                views[i].leadingAnchor.constraint(equalTo: page.leadingAnchor),
+            ])
+        }
+        window?.title = tabs.tabViewItems[tabs.selectedTabViewItemIndex].label
+        tabs.fitWindow()
+    }
+
+    // MARK: Tabs
+
+    private func badgeTab() -> NSView {
+        languages = InputSource.installedLanguages()
+        let current = InputSource.currentCode()
+        if !languages.contains(where: { $0.code == current }) { languages.insert((current, []), at: 0) }
+        if let p = previewCode, !languages.contains(where: { $0.code == p }) { previewCode = nil }
+        preview.code = previewCode ?? current
+        preview.update()
+
+        let looks = NSGridView(views: [
+            [label(tr("Show:", "แสดง:")), popup(DisplayMode.allCases.map { ($0.rawValue, $0.title) }, Settings.mode.rawValue,
+                                               #selector(AppDelegate.pickMode))],
+            [label(tr("Style:", "รูปแบบ:")), popup(BadgeStyle.allCases.map { ($0.rawValue, $0.title) }, Settings.style.rawValue,
+                                                 #selector(AppDelegate.pickStyle))],
+            [label(tr("Size:", "ขนาด:")), popup(BadgeSize.allCases.map { ($0.rawValue, $0.title) }, Settings.size.rawValue,
+                                               #selector(AppDelegate.pickSize))],
+            [label(tr("Border:", "เส้นขอบ:")), toggle(Settings.badgeBorder, #selector(toggleBorder(_:)))],
+        ])
+        looks.rowSpacing = 8
+        looks.column(at: 0).xPlacement = .trailing
+        looks.rowAlignment = .firstBaseline
+        looks.setContentHuggingPriority(.required, for: .vertical)  // its own height, not the preview's
+        let top = NSStackView(views: [preview, looks])
+        top.spacing = 20
+        top.alignment = .top
+
+        wells = []
+        resets = []
+        let rows: [[NSView]] = languages.enumerated().map { i, lang in
+            let name = NSMutableAttributedString(string: lang.code, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
+            if !lang.layouts.isEmpty {
+                name.append(NSAttributedString(string: "   " + lang.layouts.joined(separator: ", "),
+                                               attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                                                            .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+            let title = NSTextField(labelWithAttributedString: name)
+            title.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+            let show = toggle(!Settings.hidden.contains(lang.code), #selector(toggleLanguage(_:)))
+            show.tag = i
+            let well = NSColorWell()
+            well.color = Palette.color(for: lang.code)
+            well.target = self
+            well.action = #selector(colorChanged(_:))
+            well.tag = i
+            well.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            wells.append(well)
+            let reset = NSButton(title: tr("Default", "สีเดิม"), target: self, action: #selector(resetColor(_:)))
+            reset.tag = i
+            reset.controlSize = .small
+            reset.isEnabled = Palette.hasCustomColor(for: lang.code)
+            resets.append(reset)
+            return [title, well, reset, show]
+        }
+        let column = { (text: String) -> NSTextField in
+            let l = NSTextField(labelWithString: text)
+            l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            l.textColor = .secondaryLabelColor
+            return l
+        }
+        let list = NSGridView(views: [[column(tr("Keyboard", "แป้นพิมพ์")), column(tr("Colour", "สี")), NSGridCell.emptyContentView,
+                                       column(tr("Show badge", "แสดงป้าย"))]] + rows)
+        list.column(at: 3).xPlacement = .center
+        list.row(at: 0).bottomPadding = -2
+        list.rowSpacing = 8
+        list.columnSpacing = 12
+        list.rowAlignment = .none
+        for r in 0..<list.numberOfRows { list.row(at: r).yPlacement = .center }
+
+        let heading = NSStackView(views: [header(tr("Languages", "ภาษา")),
+                                          caption(tr("The keyboards added in System Settings → Keyboard → Input Sources.",
+                                                     "แป้นพิมพ์ที่เพิ่มไว้ใน System Settings → Keyboard → Input Sources"))])
+        heading.orientation = .vertical
+        heading.alignment = .leading
+        heading.spacing = 2
+        return tab([top, heading, list])
+    }
+
+    private func fixTab() -> NSView {
+        guard let app else { return NSView() }
+        let mode = Settings.fixMode
+        let modes: [(FixMode, String)] = [
+            (.off, tr("Nothing is fixed, and CursorLingo doesn't look at your typing at all.", "ไม่แก้อะไรให้ และไม่ดูสิ่งที่คุณพิมพ์เลย")),
+            (.manual, tr("Tap Shift twice to convert the word before the cursor, or the selected text.",
+                         "พิมพ์ผิดภาษาเมื่อไหร่ กด Shift 2 ครั้งติดกัน คำล่าสุด (หรือข้อความที่เลือกไว้) จะเปลี่ยนเป็นอีกภาษาให้")),
+            (.automatic, tr("Words typed in the wrong language are fixed as you type. If a fix is wrong, double Shift puts it back.",
+                            "แก้คำที่พิมพ์ผิดภาษาให้เองระหว่างพิมพ์ ถ้าแก้ไม่ตรงใจ กด Shift 2 ครั้งเพื่อย้อนคืน")),
+        ]
+        var views: [NSView] = [header(tr("Fix Wrong Language (EN ⇄ TH)", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH)"))]
+        for (i, (m, detail)) in modes.enumerated() {
+            let radio = NSButton(radioButtonWithTitle: m.title, target: self, action: #selector(fixModeChanged(_:)))
+            radio.tag = i
+            radio.state = m == mode ? .on : .off
+            let detailText = caption(detail)
+            detailText.textColor = .secondaryLabelColor
+            let item = NSStackView(views: [radio, indented(detailText)])
+            item.orientation = .vertical
+            item.alignment = .leading
+            item.spacing = 2
+            views.append(item)
+        }
+        if mode != .off {
+            let status = app.autoFix.status
+            let dot = NSTextField(labelWithString: "●")
+            dot.textColor = status.problem == nil ? .systemGreen : .systemOrange
+            var parts: [NSView] = [dot, label(status.text)]
+            if status.problem == .permission {
+                parts.append(button(tr("Open Privacy Settings…", "เปิด Privacy & Security…"), #selector(AppDelegate.openPrivacySettings), app))
+            }
+            if status.problem == .notRunning {
+                parts.append(button(tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(AppDelegate.relaunch), app))
+            }
+            views.append(line(parts))
+        }
+
+        views.append(separator())
+        let editors = toggle(Settings.codeEditorsManual, #selector(codeEditorsChanged(_:)))
+        editors.isEnabled = mode == .automatic
+        views.append(optionRow(tr("Code editors: fix only on double Shift", "โปรแกรมเขียนโค้ด: แก้เฉพาะตอนกด Shift 2 ครั้ง"),
+                               tr("Names in code often look like wrong-language words, so these apps aren't fixed automatically: "
+                                  + AutoFix.codeEditorNames + ". Terminals (" + AutoFix.terminalNames + ") never are, whatever this is set to. "
+                                  + "Both lists come with CursorLingo; ask for more on GitHub.",
+                                  "ชื่อตัวแปรในโค้ดหน้าตาคล้ายคำพิมพ์ผิดภาษาบ่อยๆ เลยไม่แก้เองในแอปพวกนี้: " + AutoFix.codeEditorNames
+                                  + " ส่วน Terminal (" + AutoFix.terminalNames + ") ไม่แก้เองเลย ไม่ว่าจะตั้งตรงนี้ไว้ยังไง "
+                                  + "รายชื่อแอปมีมากับ CursorLingo อยากให้เพิ่มแอปไหน บอกได้ที่ GitHub"),
+                               editors))
+        let learned = app.autoFix.rules.count
+        let forget = button(tr("Forget", "ล้าง"), #selector(AppDelegate.forgetLearned), app)
+        forget.isEnabled = learned > 0
+        views.append(optionRow(learned == 0 ? tr("Learned words: none yet", "คำที่จำไว้: ยังไม่มี")
+                                            : tr("Learned words: \(learned)", "คำที่จำไว้: \(learned) คำ"),
+                               tr("When you convert or undo a word with double Shift, CursorLingo remembers it and does the same next time. Kept on this Mac only.",
+                                  "คำไหนที่คุณกด Shift 2 ครั้งเพื่อแปลงหรือย้อนคืน จะถูกจำไว้ แล้วครั้งหน้าทำแบบเดียวกันให้เอง เก็บไว้ในเครื่องนี้เท่านั้น"),
+                               forget))
+        views.append(separator())
+        views.append(optionRow(tr("Remember language per app", "จำภาษาของแต่ละแอป"),
+                               tr("Going back to an app switches to the keyboard you last used there. Works even with fixing off.",
+                                  "กลับไปแอปไหน ก็สลับเป็นภาษาที่ใช้ล่าสุดในแอปนั้นให้เอง ใช้ได้แม้จะปิดการแก้คำไว้"),
+                               toggle(Settings.perAppLanguage, #selector(perAppChanged(_:)))))
+        return tab(views)
+    }
+
+    private func presentationTab() -> NSView {
+        guard let app else { return NSView() }
+        let tools: [(PresentTool, Bool, Selector, String)] = [
+            (.spotlight, app.presenter.spotlight, #selector(spotlightChanged(_:)),
+             tr("Dims the screen except for a circle around the pointer. You can still click and type as usual.",
+                "หรี่จอ เหลือวงกลมใสรอบเมาส์ ยังคลิกและพิมพ์ได้ตามปกติ")),
+            (.zoom, app.presenter.zoom, #selector(zoomToolChanged(_:)),
+             tr("Magnifies what is under the pointer, inside the circle. Needs Screen Recording permission.",
+                "ขยายจุดที่เมาส์ชี้ให้ใหญ่ขึ้นในวงกลม (ต้องอนุญาต Screen Recording ก่อน)")),
+            (.draw, app.presenter.drawing, #selector(drawChanged(_:)),
+             tr("Draw over the screen with the mouse. While it's on, clicks draw instead of reaching apps; Esc stops.",
+                "ลากเมาส์ขีดเขียนบนจอได้เลย ระหว่างนี้คลิกจะเป็นการวาด ไม่โดนแอปข้างใต้ กด Esc เพื่อเลิกวาด")),
+        ]
+        shortcutFields = [:]
+        let heading = NSStackView(views: [header(tr("Tools", "เครื่องมือ")),
+                                          caption(tr("To change a shortcut, click it and press the new keys (⌃, ⌥ or ⌘ with a letter, "
+                                                     + "number or F-key). Delete clears it.",
+                                                     "อยากเปลี่ยนคีย์ลัด คลิกที่ช่องแล้วกดคีย์ใหม่ (⌃ ⌥ หรือ ⌘ คู่กับตัวอักษร ตัวเลข หรือปุ่ม F) "
+                                                     + "ถ้าไม่อยากใช้คีย์ลัด กด Delete"))])
+        heading.orientation = .vertical
+        heading.alignment = .leading
+        heading.spacing = 2
+        var views: [NSView] = [heading]
+        for (tool, on, action, detail) in tools {
+            let field = ShortcutField()
+            field.shortcut = Settings.shortcut(tool)
+            field.onRecord = { [weak self] s in self?.setShortcut(tool, s) }
+            field.onListening = { [weak app] listening in app?.pauseShortcuts(listening) }
+            field.widthAnchor.constraint(equalToConstant: 104).isActive = true
+            field.toolTip = tr("Click, then press the new keys. Delete clears it.", "คลิกแล้วกดคีย์ใหม่ กด Delete เพื่อล้าง")
+            shortcutFields[tool] = field
+            let onOff = toggle(on, action)
+            if tool == .zoom { onOff.isEnabled = Presenter.zoomAvailable }
+            let controls = NSStackView(views: [field, onOff])
+            controls.spacing = 14
+            views.append(optionRow(tool.title, detail, controls, detailWidth: 300))
+            if tool == .zoom && app.presenter.zoomBlocked && !CGPreflightScreenCaptureAccess() {
+                let dot = NSTextField(labelWithString: "●")
+                dot.textColor = .systemOrange
+                views.append(line(dot, label(tr("Screen Recording isn't allowed yet.", "ยังไม่ได้อนุญาต Screen Recording")),
+                                  button(tr("Open Privacy Settings…", "เปิด Privacy & Security…"),
+                                         #selector(AppDelegate.openScreenRecordingSettings), app)))
+            }
+        }
+        showShortcutStatus("")
+        shortcutStatus.textColor = .systemRed
+        let restore = NSButton(title: tr("Restore Default Shortcuts", "คืนค่าคีย์ลัดเริ่มต้น"), target: self,
+                               action: #selector(restoreShortcuts))
+        restore.controlSize = .small
+        let restoreRow = NSStackView()
+        restoreRow.addView(shortcutStatus, in: .leading)
+        restoreRow.addView(restore, in: .trailing)
+        restoreRow.widthAnchor.constraint(equalToConstant: 472).isActive = true
+        views.append(restoreRow)
+
+        views.append(separator())
+        views.append(header(tr("Circle", "วงกลม")))
+        let size = NSSlider(value: Double(app.presenter.radius), minValue: Double(Presenter.minRadius),
+                            maxValue: Double(Presenter.maxRadius), target: self, action: #selector(radiusChanged(_:)))
+        let zoom = NSSlider(value: Double(app.presenter.zoomLevel), minValue: Double(Presenter.minZoom),
+                            maxValue: Double(Presenter.maxZoom), target: self, action: #selector(zoomChanged(_:)))
+        for s in [size, zoom] { s.widthAnchor.constraint(equalToConstant: 260).isActive = true }
+        radiusChanged(size)
+        zoomChanged(zoom)
+        for v in [radiusValue, zoomValue] {
+            v.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+            v.textColor = .secondaryLabelColor
+        }
+        let sliders = NSGridView(views: [[label(tr("Size", "ขนาดวง")), size, radiusValue],
+                                         [label(tr("Magnification", "ระดับซูม")), zoom, zoomValue]])
+        sliders.rowSpacing = 10
+        sliders.columnSpacing = 12
+        for r in 0..<sliders.numberOfRows { sliders.row(at: r).yPlacement = .center }
+        views.append(sliders)
+
+        views.append(separator())
+        views.append(header(tr("While a Tool Is On", "ระหว่างใช้งาน")))
+        let keys: [(String, String)] = [
+            ("⌃⌥ + " + tr("scroll", "ล้อเมาส์"), tr("Resize the circle", "ปรับขนาดวง")),
+            ("⌃⌥ =   ⌃⌥ −", tr("Zoom in / out", "ซูมเข้า / ออก")),
+            ("⌘Z", tr("Take back the last stroke", "ลบเส้นที่วาดล่าสุด")),
+            ("Esc", tr("Stop drawing; press again to turn everything off", "เลิกวาด กดอีกครั้งเพื่อปิดทั้งหมด")),
+            (tr("Click", "คลิก"), tr("A ring in the colour of the language in use", "มีวงกระเพื่อมออกมา เป็นสีของภาษาที่ใช้อยู่")),
+        ]
+        let legend = NSGridView(views: keys.map { [keycap($0.0), label($0.1)] })
+        legend.rowSpacing = 6
+        legend.columnSpacing = 14
+        for r in 0..<legend.numberOfRows { legend.row(at: r).yPlacement = .center }
+        views.append(legend)
+        return tab(views)
+    }
+
+    private func generalTab() -> NSView {
+        guard let app else { return NSView() }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let language = popup(UILanguage.allCases.map { ($0.rawValue, $0.title) }, Settings.uiLanguage.rawValue,
+                             #selector(AppDelegate.pickUILanguage))
+
+        let icon = NSImageView(image: NSApp.applicationIconImage)
+        icon.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 48).isActive = true
+        let name = NSTextField(labelWithString: "CursorLingo")
+        name.font = .systemFont(ofSize: 15, weight: .semibold)
+        let about = NSStackView(views: [name, caption(tr("Version \(version) · Free and open source · No network access, no tracking",
+                                                          "เวอร์ชัน \(version) · ฟรีและโอเพนซอร์ส · ไม่ต่อเน็ต ไม่เก็บข้อมูลการใช้งาน"))])
+        about.orientation = .vertical
+        about.alignment = .leading
+        about.spacing = 2
+        let top = NSStackView(views: [icon, about])
+        top.spacing = 12
+
+        let pitch = caption(tr("CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub or a "
+                               + "share with friends means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
+                               "CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ "
+                               + "ฝากกดดาวบน GitHub หรือแชร์ให้เพื่อนๆ หน่อยนะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"))
+        pitch.textColor = .secondaryLabelColor
+        let support = NSStackView(views: [
+            header(tr("Support CursorLingo", "สนับสนุน CursorLingo")),
+            pitch,
+            line(NSButton(title: tr("★ Star on GitHub", "★ ให้ดาวบน GitHub"), target: self, action: #selector(openRepo)),
+                 NSButton(title: tr("How to Contribute", "วิธีร่วมพัฒนา"), target: self, action: #selector(openContributing))),
+        ])
+        support.orientation = .vertical
+        support.alignment = .leading
+        support.spacing = 8
+
+        return tab([
+            top,
+            separator(),
+            optionRow(tr("Open at login", "เปิด CursorLingo อัตโนมัติ"),
+                      tr("Starts by itself when you log in to your Mac, so the badge is always there.",
+                         "เปิดเครื่องหรือล็อกอินเมื่อไหร่ CursorLingo ก็ทำงานเลย ไม่ต้องคอยเปิดเอง"),
+                      toggle(LoginItem.isEnabled, #selector(loginChanged(_:)))),
+            optionRow("Language / ภาษา", tr("The language of the menu and this window.", "ภาษาที่ใช้ในเมนูและหน้าต่างนี้"), language),
+            optionRow(tr("Found a wrong fix or a bug?", "เจอคำที่แก้ผิด หรือเจอบั๊ก?"),
+                      tr("Opens the report form on GitHub in your browser. Nothing you typed is attached.",
+                         "จะเปิดหน้าแจ้งปัญหาบน GitHub ในเบราว์เซอร์ ไม่มีอะไรที่คุณพิมพ์ติดไปด้วย"),
+                      button(tr("Report…", "แจ้งปัญหา…"), #selector(AppDelegate.reportIssue), app)),
+            separator(),
+            support,
+        ])
+    }
+
+    // MARK: Actions
+
+    @objc private func fixModeChanged(_ sender: NSButton) {
+        let item = NSMenuItem()
+        item.representedObject = [FixMode.off, .manual, .automatic][sender.tag].rawValue
+        app?.pickFixMode(item)
+        reload()
+    }
+
+    @objc private func loginChanged(_ sender: NSSwitch) {
+        if (sender.state == .on) != LoginItem.isEnabled { app?.toggleLogin() }
+    }
+    @objc private func openRepo() {
+        if let url = URL(string: "https://github.com/kittipongint/cursor-lingo") { NSWorkspace.shared.open(url) }
+    }
+    @objc private func openContributing() {
+        if let url = URL(string: "https://github.com/kittipongint/cursor-lingo/blob/main/CONTRIBUTING.md") { NSWorkspace.shared.open(url) }
+    }
+
+    @objc private func spotlightChanged(_ sender: NSSwitch) {
+        if (sender.state == .on) != app?.presenter.spotlight { app?.toggleSpotlight() }
+    }
+    @objc private func zoomToolChanged(_ sender: NSSwitch) {
+        if (sender.state == .on) != app?.presenter.zoom { app?.toggleZoom() }
+        reload()  // zoom may have been refused for want of permission
+    }
+    @objc private func drawChanged(_ sender: NSSwitch) {
+        if (sender.state == .on) != app?.presenter.drawing { app?.toggleDrawing() }
+    }
+
+    @objc private func codeEditorsChanged(_ sender: NSSwitch) {
+        if (sender.state == .on) != Settings.codeEditorsManual { app?.toggleCodeEditorsManual() }
+    }
+
+    @objc private func perAppChanged(_ sender: NSSwitch) {
+        if (sender.state == .on) != Settings.perAppLanguage { app?.togglePerAppLanguage() }
+    }
+
+    @objc private func toggleBorder(_ sender: NSControl) {
+        Settings.badgeBorder = (sender as? NSSwitch)?.state == .on
+        preview.update()
+        app?.refresh(animated: false)
+    }
+
+    @objc private func toggleLanguage(_ sender: NSSwitch) {
+        let code = languages[sender.tag].code
+        var hidden = Settings.hidden
+        if sender.state == .on { hidden.remove(code) } else { hidden.insert(code) }
+        Settings.hidden = hidden
+        previewCode = code
+        preview.code = code
+        app?.refresh(animated: true)
+    }
+
+    @objc private func colorChanged(_ sender: NSColorWell) {
+        let code = languages[sender.tag].code
+        Palette.setColor(sender.color, for: code)
+        resets[sender.tag].isEnabled = true
+        previewCode = code
+        preview.code = code
+        preview.update()
+        app?.refresh(animated: false)
+    }
+
+    @objc private func resetColor(_ sender: NSButton) {
+        let code = languages[sender.tag].code
+        Palette.setColor(nil, for: code)
+        wells[sender.tag].color = Palette.color(for: code)
+        sender.isEnabled = false
+        previewCode = code
+        preview.code = code
+        preview.update()
+        app?.refresh(animated: false)
+    }
+
+    @objc private func radiusChanged(_ sender: NSSlider) {
+        app?.presenter.radius = CGFloat(sender.doubleValue)
+        Settings.spotlightRadius = sender.doubleValue
+        radiusValue.stringValue = tr("\(Int(sender.doubleValue)) pt", "\(Int(sender.doubleValue)) พอยต์")
+    }
+
+    @objc private func zoomChanged(_ sender: NSSlider) {
+        app?.presenter.zoomLevel = CGFloat(sender.doubleValue)
+        Settings.zoomLevel = sender.doubleValue
+        zoomValue.stringValue = String(format: "%.1f×", sender.doubleValue)
+    }
+
+    /// Popups pass their selected item, like the menu does.
+    @objc private func popupChanged(_ sender: NSPopUpButton) {
+        guard let item = sender.selectedItem, let action = sender.identifier?.rawValue else { return }
+        NSApp.sendAction(NSSelectorFromString(action), to: app, from: item)
+        reload()
+    }
+
+    @objc private func appAction(_ sender: NSControl) {
+        guard let action = sender.cell?.representedObject as? String else { return }
+        NSApp.sendAction(NSSelectorFromString(action), to: app, from: sender)
+        reload()
+    }
+
+    private func setShortcut(_ tool: PresentTool, _ s: Shortcut?) {
         if let s {
             if Shortcut.reserved.contains(s) {
-                return fail(tr("\(s.display) is used while a tool is on. Pick another.",
-                               "\(s.display) ใช้อยู่ตอนเปิดเครื่องมือ เลือกคีย์อื่น"))
+                return shortcutFailed(tr("\(s.display) is taken while a tool is on. Pick another.", "\(s.display) ใช้ตอนเปิดเครื่องมืออยู่แล้ว เลือกคีย์อื่นนะ"))
             }
             if let other = PresentTool.allCases.first(where: { $0 != tool && Settings.shortcut($0) == s }) {
-                return fail(tr("\(s.display) is already used for \(other.title).", "\(s.display) ใช้กับ\(other.title)อยู่แล้ว"))
+                return shortcutFailed(tr("\(s.display) is already used for \(other.title).", "\(s.display) ใช้กับ\(other.title)อยู่แล้ว"))
             }
         }
         let old = Settings.shortcut(tool)
         Settings.setShortcut(s, for: tool)
-        let failed = apply?() ?? []
+        let failed = app?.registerShortcuts() ?? []
         if let s, failed.contains(tool) {
             Settings.setShortcut(old, for: tool)
-            _ = apply?()
-            return fail(tr("Another app already uses \(s.display).", "มีแอปอื่นใช้ \(s.display) อยู่แล้ว"))
+            _ = app?.registerShortcuts()
+            return shortcutFailed(tr("Another app already uses \(s.display).", "มีแอปอื่นใช้ \(s.display) อยู่แล้ว"))
         }
-        status.stringValue = ""
-        refresh()
+        showShortcutStatus("")
+        for (tool, field) in shortcutFields { field.shortcut = Settings.shortcut(tool) }
     }
 
-    private func fail(_ message: String) {
-        status.stringValue = message
+    private func showShortcutStatus(_ message: String) {
+        shortcutStatus.stringValue = message
+        shortcutStatus.isHidden = message.isEmpty
+    }
+
+    private func shortcutFailed(_ message: String) {
+        showShortcutStatus(message)
         NSSound.beep()
-        refresh()
+        for (tool, field) in shortcutFields { field.shortcut = Settings.shortcut(tool) }
     }
 
-    private func refresh() {
-        for (tool, field) in fields { field.shortcut = Settings.shortcut(tool) }
-    }
 
-    @objc private func clear(_ sender: NSButton) { set(PresentTool.allCases[sender.tag], nil) }
-
-    @objc private func restoreDefaults() {
+    @objc private func restoreShortcuts() {
         Settings.resetShortcuts()
-        let failed = apply?() ?? []
-        status.stringValue = failed.isEmpty ? "" : tr("Another app already uses: ", "มีแอปอื่นใช้คีย์นี้อยู่แล้ว: ")
-            + failed.map { $0.defaultShortcut.display }.joined(separator: ", ")
-        refresh()
+        let failed = app?.registerShortcuts() ?? []
+        showShortcutStatus(failed.isEmpty ? "" : tr("Another app already uses: ", "มีแอปอื่นใช้คีย์นี้อยู่แล้ว: ")
+            + failed.map { $0.defaultShortcut.display }.joined(separator: ", "))
+        for (tool, field) in shortcutFields { field.shortcut = Settings.shortcut(tool) }
     }
 
     func windowWillClose(_ notification: Notification) {
-        window?.makeFirstResponder(nil)  // a box still listening lets go, and the shortcuts come back
+        window?.makeFirstResponder(nil)  // a shortcut box still listening lets go, and the shortcuts come back
+        NSColorPanel.shared.close()
+    }
+
+    // MARK: Building blocks
+
+    private func tab(_ views: [NSView]) -> NSView {
+        for v in views where v is NSGridView || v is NSStackView { v.setContentHuggingPriority(.required, for: .horizontal) }
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 24, right: 24)
+        stack.widthAnchor.constraint(greaterThanOrEqualToConstant: 520).isActive = true
+        return stack
+    }
+
+    private func label(_ text: String) -> NSTextField { NSTextField(labelWithString: text) }
+
+    private func header(_ text: String) -> NSTextField {
+        let l = NSTextField(labelWithString: text)
+        l.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        return l
+    }
+
+    /// A setting as a row: title and explanation on the left, its control on the right.
+    private func optionRow(_ title: String, _ detail: String, _ control: NSView, detailWidth: CGFloat = 370) -> NSView {
+        let detailText = caption(detail)
+        detailText.textColor = .secondaryLabelColor
+        detailText.preferredMaxLayoutWidth = detailWidth
+        let text = NSStackView(views: [label(title), detailText])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 2
+        let row = NSStackView()
+        row.addView(text, in: .leading)
+        row.addView(control, in: .trailing)
+        row.alignment = .top
+        row.widthAnchor.constraint(equalToConstant: 472).isActive = true
+        return row
+    }
+
+    /// A key as printed on a keyboard, for the list of keys.
+    private func keycap(_ text: String) -> NSView {
+        let l = NSTextField(labelWithString: text)
+        l.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        let box = NSStackView(views: [l])
+        box.edgeInsets = NSEdgeInsets(top: 2, left: 7, bottom: 2, right: 7)
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 5
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = NSColor.separatorColor.cgColor
+        box.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
+        let cell = NSStackView(views: [box])  // left-aligned in its column
+        cell.widthAnchor.constraint(equalToConstant: 104).isActive = true
+        cell.alignment = .centerY
+        return cell
+    }
+
+    private func separator() -> NSView {
+        let box = NSBox()
+        box.boxType = .separator
+        box.widthAnchor.constraint(equalToConstant: 472).isActive = true
+        return box
+    }
+
+    /// Lines a caption up with the title of the radio button above it.
+    private func indented(_ view: NSView) -> NSView {
+        let s = NSStackView(views: [view])
+        s.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
+        return s
+    }
+
+    /// A quiet one-liner under a heading.
+    private func caption(_ text: String) -> NSTextField {
+        let l = NSTextField(wrappingLabelWithString: text)
+        l.textColor = .tertiaryLabelColor
+        l.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        l.preferredMaxLayoutWidth = 470
+        return l
+    }
+
+    private func toggle(_ on: Bool, _ action: Selector) -> NSSwitch {
+        let s = NSSwitch()
+        s.controlSize = .small
+        s.state = on ? .on : .off
+        s.target = self
+        s.action = action
+        return s
+    }
+
+    private func note(_ text: String) -> NSTextField {
+        let l = NSTextField(wrappingLabelWithString: text)
+        l.textColor = .secondaryLabelColor
+        l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        l.preferredMaxLayoutWidth = 470
+        return l
+    }
+
+    private func line(_ views: NSView...) -> NSStackView { line(views) }
+    private func line(_ views: [NSView]) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.spacing = 8
+        s.alignment = .firstBaseline
+        return s
+    }
+
+    /// A popup whose items carry the value and the AppDelegate action, exactly like the menu's submenus.
+    private func popup(_ options: [(String, String)], _ selected: String, _ action: Selector) -> NSPopUpButton {
+        let p = NSPopUpButton(frame: .zero, pullsDown: false)
+        for (value, title) in options {
+            p.addItem(withTitle: title)
+            p.lastItem?.representedObject = value
+        }
+        p.identifier = NSUserInterfaceItemIdentifier(NSStringFromSelector(action))
+        p.selectItem(at: options.firstIndex { $0.0 == selected } ?? 0)
+        p.target = self
+        p.action = #selector(popupChanged(_:))
+        return p
+    }
+
+    private func check(_ title: String, _ on: Bool, _ action: Selector, _ target: AnyObject) -> NSButton {
+        let b = NSButton(checkboxWithTitle: title, target: self, action: #selector(appAction(_:)))
+        b.cell?.representedObject = NSStringFromSelector(action)
+        b.state = on ? .on : .off
+        return b
+    }
+
+    private func button(_ title: String, _ action: Selector, _ target: AnyObject) -> NSButton {
+        if target === self { return NSButton(title: title, target: self, action: action) }
+        let b = NSButton(title: title, target: self, action: #selector(appAction(_:)))
+        b.cell?.representedObject = NSStringFromSelector(action)
+        return b
+    }
+}
+
+/// Toolbar tabs, with the window resized to fit the tab that is showing.
+final class SettingsTabs: NSTabViewController {
+    override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: item)
+        view.window?.title = item?.label ?? ""
+        fitWindow()
+    }
+
+    func fitWindow() {
+        guard let window = view.window,
+              let content = tabViewItems[selectedTabViewItemIndex].viewController?.view.subviews.first else { return }
+        content.layoutSubtreeIfNeeded()
+        let size = content.fittingSize
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)  // keep the top edge
+        window.setFrame(frame, display: true, animate: window.isVisible)
     }
 }
 
@@ -1470,11 +2145,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var screenFrames: [NSRect] = []
     private var badgeSize = NSSize.zero
     private var visible = false
-    private let autoFix = AutoFix()
+    let autoFix = AutoFix()
     private var autoFixRetry: Timer?
-    private let presenter = Presenter()
+    let presenter = Presenter()
     private var presentationKeys: [HotKey] = []
-    private let shortcutsWindow = ShortcutsWindow()
+    private let settingsWindow = SettingsWindow()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildPanel()
@@ -1508,12 +2183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presenter.onChange = { [weak self] in
             guard let self else { return }
             Settings.presentation = self.presenter.spotlight
+            self.settingsWindow.reload()
         }
         registerShortcuts()
-        shortcutsWindow.apply = { [weak self] in self?.registerShortcuts() ?? [] }
-        shortcutsWindow.pause = { [weak self] on in
-            if on { self?.presentationKeys = [] } else { self?.registerShortcuts() }
-        }
+        settingsWindow.app = self
 
         let mouseEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         if let m = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents, handler: { [weak self] _ in self?.follow() }) {
@@ -1602,7 +2275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         backing: .buffered, defer: true)
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = Settings.badgeBorder  // the window shadow outlines the badge too, so it goes with the border
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
@@ -1634,16 +2307,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func inputSourceChanged() {
+        settingsWindow.inputChanged()
         if Settings.perAppLanguage { rememberAppLanguage() }
         refresh(animated: true)
     }
 
-    private func refresh(animated: Bool) {
+    func refresh(animated: Bool) {
         autoFix.inputChanged()
         let code = InputSource.currentCode()
         badge.code = code
         badge.style = Settings.style
         badge.scale = Settings.size.scale
+        panel.hasShadow = Settings.badgeBorder
+        panel.invalidateShadow()
         let size = BadgeView.size(style: Settings.style, scale: badge.scale, code: code)
         if size != badgeSize {
             badgeSize = size
@@ -1719,38 +2395,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         header.isEnabled = false
         menu.addItem(header)
 
-        let hideCurrent = item(tr("Hide badge for \(code)", "ซ่อนป้ายเมื่อเป็น \(code)"), #selector(toggleHideCurrent), on: Settings.hidden.contains(code))
-        menu.addItem(hideCurrent)
-        if !Settings.hidden.isEmpty {
-            menu.addItem(item(tr("Show for all languages", "แสดงป้ายทุกภาษา"), #selector(clearHidden)))
-        }
         menu.addItem(.separator())
-
-        menu.addItem(submenu(tr("Show", "แสดงป้าย"), DisplayMode.allCases.map { ($0.rawValue, $0.title) },
-                             selected: Settings.mode.rawValue, #selector(pickMode)))
-        menu.addItem(submenu(tr("Style", "รูปแบบ"), BadgeStyle.allCases.map { ($0.rawValue, $0.title) },
-                             selected: Settings.style.rawValue, #selector(pickStyle)))
-        menu.addItem(submenu(tr("Size", "ขนาด"), BadgeSize.allCases.map { ($0.rawValue, $0.title) },
-                             selected: Settings.size.rawValue, #selector(pickSize)))
         menu.addItem(presentationMenu())
-        menu.addItem(.separator())
-        // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic.
-        let fixItem = submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
-                              FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue,
-                              #selector(pickFixMode))
-        let fix = fixItem.submenu!
-        fix.addItem(.separator())
-        let editors = item(tr("In Code Editors: Double Shift Only", "ใน code editor แก้เฉพาะตอนกด Shift 2 ครั้ง"),
-                           #selector(toggleCodeEditorsManual), on: Settings.codeEditorsManual)
-        editors.isEnabled = Settings.fixMode == .automatic
-        fix.addItem(editors)
-        let learned = autoFix.rules.count
-        let forget = item(learned == 0 ? tr("Learned Words: None Yet", "ยังไม่มีคำที่จำไว้")
-                                       : tr("Forget \(learned) Learned Word\(learned == 1 ? "" : "s")", "ล้างคำที่จำไว้ (\(learned) คำ)"),
-                          #selector(forgetLearned))
-        forget.isEnabled = learned > 0
-        fix.addItem(forget)
-        menu.addItem(fixItem)
+        // One menu for the whole feature: Off, Double Shift Only (fix on request) or Automatic. The rest is in Settings.
+        menu.addItem(submenu(tr("Fix Wrong Language (EN ⇄ TH): ", "แก้คำที่พิมพ์ผิดภาษา (EN ⇄ TH): ") + Settings.fixMode.title,
+                             FixMode.allCases.map { ($0.rawValue, $0.title) }, selected: Settings.fixMode.rawValue,
+                             #selector(pickFixMode)))
         if Settings.fixMode != .off {
             let status = autoFix.status
             let line = NSMenuItem(title: "    " + status.text, action: nil, keyEquivalent: "")
@@ -1763,14 +2413,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(item("    " + tr("Relaunch CursorLingo", "เปิด CursorLingo ใหม่"), #selector(relaunch)))
             }
         }
-        menu.addItem(item(tr("Remember Language per App", "จำภาษาของแต่ละแอป"), #selector(togglePerAppLanguage),
-                          on: Settings.perAppLanguage))
-        menu.addItem(item(tr("Launch at Login", "เปิดพร้อมเครื่อง"), #selector(toggleLogin), on: LoginItem.isEnabled))
         menu.addItem(.separator())
-        // Bilingual on purpose, so it can be found whichever language the menu is in.
-        menu.addItem(submenu("Language / ภาษา", UILanguage.allCases.map { ($0.rawValue, $0.title) },
-                             selected: Settings.uiLanguage.rawValue, #selector(pickUILanguage)))
-        menu.addItem(item(tr("Report a Wrong Fix or Bug…", "แจ้งปัญหาหรือคำที่แก้ผิด…"), #selector(reportIssue)))
+        menu.addItem(item(tr("Settings…", "ตั้งค่า…"), #selector(showSettings), key: ","))
         menu.addItem(item(tr("Quit CursorLingo", "ปิด CursorLingo"), #selector(quit), key: "q"))
     }
 
@@ -1794,33 +2438,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return parent
     }
 
-    @objc private func pickUILanguage(_ s: NSMenuItem) {
+    @objc func pickUILanguage(_ s: NSMenuItem) {
         Settings.uiLanguage = UILanguage(rawValue: s.representedObject as? String ?? "") ?? .system
     }
-    @objc private func pickMode(_ s: NSMenuItem) {
+    @objc func pickMode(_ s: NSMenuItem) {
         Settings.mode = DisplayMode(rawValue: s.representedObject as? String ?? "") ?? .always
         refresh(animated: Settings.mode == .onSwitch)
     }
-    @objc private func pickStyle(_ s: NSMenuItem) {
+    @objc func pickStyle(_ s: NSMenuItem) {
         Settings.style = BadgeStyle(rawValue: s.representedObject as? String ?? "") ?? .color
         refresh(animated: true)
     }
-    @objc private func pickSize(_ s: NSMenuItem) {
+    @objc func pickSize(_ s: NSMenuItem) {
         Settings.size = BadgeSize(rawValue: s.representedObject as? String ?? "") ?? .medium
         refresh(animated: true)
     }
-    @objc private func toggleHideCurrent() {
-        let code = InputSource.currentCode()
-        var h = Settings.hidden
-        if h.contains(code) { h.remove(code) } else { h.insert(code) }
-        Settings.hidden = h
-        refresh(animated: true)
-    }
-    @objc private func clearHidden() {
-        Settings.hidden = []
-        refresh(animated: true)
-    }
-    @objc private func pickFixMode(_ s: NSMenuItem) {
+    @objc func pickFixMode(_ s: NSMenuItem) {
         let mode = FixMode(rawValue: s.representedObject as? String ?? "") ?? .off
         guard mode != .off else {
             Settings.autoFix = false
@@ -1855,13 +2488,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn { openPrivacySettings() }
     }
-    @objc private func openPrivacySettings() {
+    @objc func openPrivacySettings() {
         let pane = CGPreflightListenEventAccess() ? "Privacy_Accessibility" : "Privacy_ListenEvent"
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
             NSWorkspace.shared.open(url)
         }
     }
-    @objc private func relaunch() {
+    @objc func relaunch() {
         // Start a fresh copy once this one has quit (a running copy makes a new one exit immediately).
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -1869,15 +2502,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? p.run()
         NSApp.terminate(nil)
     }
-    @objc private func toggleCodeEditorsManual() {
+    @objc func toggleCodeEditorsManual() {
         Settings.codeEditorsManual.toggle()
         autoFix.codeEditorsManual = Settings.codeEditorsManual
     }
-    @objc private func forgetLearned() { autoFix.forgetRules() }
+    @objc func forgetLearned() { autoFix.forgetRules() }
     /// The tools' shortcuts (⌃⌥H, ⌃⌥Z, ⌃⌥D unless changed) work from anywhere. Returns the tools whose shortcut
     /// another app already has.
     @discardableResult
-    private func registerShortcuts() -> [PresentTool] {
+    func registerShortcuts() -> [PresentTool] {
         presentationKeys = []  // a key can't be registered twice: let the old ones go first
         var failed: [PresentTool] = []
         for tool in PresentTool.allCases {
@@ -1894,11 +2527,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .draw: toggleDrawing()
         }
     }
-    @objc private func showShortcuts() { shortcutsWindow.show() }
-    @objc private func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
-    @objc private func toggleZoom() { presenter.setZoom(!presenter.zoom) }
-    @objc private func toggleDrawing() { presenter.setDrawing(!presenter.drawing) }
-    @objc private func openScreenRecordingSettings() {
+    /// While a shortcut box in Settings listens, the keys must reach it instead of toggling a tool.
+    func pauseShortcuts(_ paused: Bool) {
+        if paused { presentationKeys = [] } else { registerShortcuts() }
+    }
+    @objc private func showShortcuts() { settingsWindow.show(.presentation) }
+    @objc private func showSettings() { settingsWindow.show() }
+    @objc func toggleSpotlight() { presenter.setSpotlight(!presenter.spotlight) }
+    @objc func toggleZoom() { presenter.setZoom(!presenter.zoom) }
+    @objc func toggleDrawing() { presenter.setDrawing(!presenter.drawing) }
+    @objc func openScreenRecordingSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
@@ -1945,15 +2583,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         top.submenu = sub
         return top
     }
-    @objc private func togglePerAppLanguage() {
+    @objc func togglePerAppLanguage() {
         Settings.perAppLanguage.toggle()
         if Settings.perAppLanguage { rememberAppLanguage() }
     }
-    @objc private func reportIssue() {
+    @objc func reportIssue() {
         // Only opens the issue form; nothing typed is ever attached.
         if let url = URL(string: "https://github.com/kittipongint/cursor-lingo/issues/new/choose") { NSWorkspace.shared.open(url) }
     }
-    @objc private func toggleLogin() { LoginItem.set(!LoginItem.isEnabled) }
+    @objc func toggleLogin() { LoginItem.set(!LoginItem.isEnabled) }
     @objc private func quit() { NSApp.terminate(nil) }
 }
 

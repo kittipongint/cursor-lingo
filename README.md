@@ -180,7 +180,18 @@ On a sample of real English and Thai words, correct text was wrongly changed in 
 
 ## Usage
 
-Click the menu-bar icon (macOS) or right-click the tray icon (Windows) to:
+### macOS
+
+The menu-bar icon shows the current input language, the **Presentation** tools, **Fix Wrong Language (EN ⇄ TH)** and its status, **Settings…** (⌘,) and Quit. **Settings…** has four tabs:
+
+- **Badge:** a live preview of the badge next to the pointer; **Show**, **Style** and **Size**; and one row per keyboard you added in System Settings → Keyboard → Input Sources (no other languages), where you hide the badge for that language or pick its color.
+- **Fix Wrong Language:** the mode, **In code editors, fix only on double Shift**, forget learned words, and **Remember language per app**.
+- **Presentation:** turn Spotlight, Zoom and Draw on Screen on or off, change their shortcuts, and set the circle size and magnification.
+- **General:** **Launch at login**, the menu's **Language / ภาษา**, **Report a Wrong Fix or Bug…** (opens the GitHub issue form; nothing you typed is attached), and the version.
+
+### Windows
+
+Right-click the tray icon to:
 
 - see the current input language,
 - hide the badge for the current language, or show it for all languages again,
