@@ -54,12 +54,12 @@
 | Tech             | Swift + AppKit, single file            | C++ / Win32 + GDI, single file, static exe     |
 | Pointer tracking | `NSEvent` global mouse monitor         | Low-level mouse hook (coalesced)               |
 | Language source  | `kTISNotifySelectedKeyboardInputSourceChanged` | `GetKeyboardLayout` of focused thread   |
-| Memory           | ~16 MB physical footprint              | ~1–2 MB working set                            |
+| Memory           | ~16 MB physical footprint              | ~3 MB private, under 1 MB working set          |
 | Idle CPU         | 0 % (no wake-ups)                      | ~0 % (one coalesced 200 ms check)              |
-| Mouse moving     | ~5 % while it never stops              | not measured yet                               |
+| Mouse moving     | ~5 % while it never stops              | ~0.2 % while it never stops                    |
 | Settings         | Settings window, from the menu-bar icon | Settings window, from the tray icon           |
 
-Measured on an Apple Silicon Mac, with the spotlight on or off alike; how, and the Windows checklist, are in [tests/performance.md](tests/performance.md). The Windows tray icon itself shows the current language code. The badge also hides automatically while a full-screen app or game is in front.
+Measured on an Apple Silicon Mac (the same with the spotlight on or off) and on an Intel Core i7 PC with Windows 11, as a share of one CPU core; how, and the numbers for each tool, are in [tests/performance.md](tests/performance.md). The Windows tray icon itself shows the current language code. The badge also hides automatically while a full-screen app or game is in front.
 
 <p align="center">
   <picture>

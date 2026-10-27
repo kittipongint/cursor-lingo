@@ -39,46 +39,60 @@ What the app keeps, and what the clean-up holds it to:
 
 ## Windows
 
-Not measured on Windows yet: the app has only been compiled (MinGW, `-Wall -Wextra`, no warnings) since the
-Settings window and the launch clean-up were added. The README's earlier figures (about 1–2 MB working set, about 0 %
-CPU idle) predate them.
+Intel Core i7-13700 (24 threads), Windows 11 Pro build 26300, one 4K screen at 150 %, release build (Visual Studio
+2026, `cmake --build build/windows --config Release`), measured 2026-10-28. The exe ran as a portable copy (an empty
+`CursorLingo.ini` next to it), so the tests never touched the settings in use. CPU is the share of one core, as on
+macOS; memory is private bytes (what Task Manager calls Memory (private working set) is close to it) and the working
+set.
 
-Run on a Windows 10 or 11 machine, from a normal PowerShell in the repository:
+[`tests/perf/measure-windows.ps1`](perf/measure-windows.ps1), 20 s per case. It copies the settings first and puts
+them back after, and asks for any other running CursorLingo to be closed first:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tests\perf\measure-windows.ps1
+powershell -ExecutionPolicy Bypass -File tests\perf\measure-windows.ps1 [-Exe path\to\CursorLingo.exe]
 ```
 
-It finds the exe in `build\windows\Release` or `build\windows-mingw` (or pass `-Exe`), copies the settings folder
-first and puts it back after, and runs:
 
-- **baseline**: idle, badge shown.
-- **moving**: the pointer moving for 20 s.
-- **huge**: a settings file of several MB (100,000 app layouts, 50,000 colours, broken lines, values out of range)
-  and a word list of 200,000 entries with damaged ones; launched twice, to see the clean-up shrink the file.
-- **garbage**: random bytes as both the settings file and the word list.
+| Case | CPU | Private | Working set | Notes |
+|------|-----|---------|-------------|-------|
+| Idle, badge shown | 0.0–0.1 % | 3.1 MB | 0.6 MB | One coalesced 200 ms check. |
+| Pointer moving (`SetCursorPos`) | 0.2 % | 3.1 MB | 0.5 MB | |
+| Huge settings, first launch | 0.2 % | 3.1 MB | 0.4 MB | A 5.6 MB settings file and a 1.5 MB word list of 200,000 entries. No crash; the file is rewritten: 12 KB. |
+| Huge settings, next launch | 0.0 % | 3.1 MB | 0.4 MB | |
+| Garbage files | 0.2 % | 3.1 MB | 0.4 MB | 300 KB of random bytes as both files. No crash. |
 
-Also check by hand, with Task Manager's Details tab (Memory (active private working set) and CPU):
+Each tool, with the pointer moved by real input (`SendInput`, which the low-level mouse hook sees, about 120
+moves/s), 10–15 s per case, in one session:
 
-- [ ] Idle with the badge, then with the Settings window open on each tab.
-- [ ] Spotlight on, still and while moving the pointer.
-- [ ] Zoom on, still and while moving (the magnifier redraws every 16 ms while it is on).
-- [ ] Drawing on: memory grows by about 4 bytes per screen pixel while the drawing layer is up (about 33 MB on one
-      4K screen) and must drop back when drawing stops.
-- [ ] Auto-fix on, typing quickly in Notepad for a minute: CPU stays low, nothing lags.
-- [ ] Sleep and wake, lock and unlock, unplug and plug a monitor: still running, badge still follows.
-- [ ] Settings window: switch all tabs, change every option, pick colours, set shortcuts (including ones another
-      app holds), change the language; no crash, no leftover windows.
+| Case | CPU | Private | Working set | Notes |
+|------|-----|---------|-------------|-------|
+| Idle, badge shown | 0.1–0.35 % | 3.1 MB | 0.4 MB | Varies between runs; never above 0.4 %. |
+| Pointer moving | 0.2 % | 3.1 MB | 0.8 MB | The badge follows the pointer. |
+| Settings window open | 0.5 % | 3.5 MB | 7.4 MB | Back to 3.8 MB private after 60 opens and closes. |
+| Spotlight on, still | 0.6–2.6 % | 4.6 MB | 9.2 MB | The ring turns on a 33 ms timer. |
+| Spotlight on, moving | 1.4 % | 4.6 MB | 9.2 MB | |
+| Zoom on, still | 4.0 % | 32.5 MB | 34.8 MB | The magnifier redraws every 16 ms while it is on. |
+| Zoom on, moving | 6.8 % | 32.4 MB | 34.7 MB | |
+| Zoom off again | 0.1–0.3 % | 32.1 MB | 34.4 MB | See below. |
+| Drawing on | 0.9 % | 63.8 MB | 66.0 MB | The drawing layer: 4 bytes per screen pixel, 32 MB on a 4K screen. |
+| Drawing off again | 0.0 % | 32.0 MB | 34.3 MB | The layer and the strokes are freed. |
 
-Fill in the numbers here when done.
+After the first use of zoom, Windows' magnifier keeps about 29 MB until the app quits. The app keeps its magnifier
+window (shrunk to 1×1 pixel) instead of closing it: closing and opening it again lost a handle each time, so zoom
+used again and again would grow; kept, it stays the same however often zoom is used.
 
-| Case | CPU | Working set | Private | Notes |
-|------|-----|-------------|---------|-------|
-| Idle, badge shown | | | | |
-| Pointer moving | | | | |
-| Huge settings, first launch | | | | |
-| Huge settings, next launch | | | | |
-| Garbage files | | | | |
-| Spotlight on, moving | | | | |
-| Zoom on, moving | | | | |
-| Drawing on | | | | |
+Robustness and leaks (all passed):
+
+- 60 cycles of opening Settings, visiting every tab, a colour-scheme change and closing; then 60 cycles of each tool
+  on and off; 300 click ripples; one 50,000-point stroke. No crash; GDI objects, window handles and kernel handles
+  the same after 30 and after 60 cycles, memory back to where it was.
+- Every control in the Settings window changed and checked against the saved file: 55 of 55.
+- A 241 KB settings file with real settings and junk: rewritten to 708 bytes on launch, with every setting, colour,
+  hidden language and app layout kept (an app name in Thai included), still UTF-16, no `.old` file left.
+- The language-detection core: 53 of 53 test cases, and 300,000 random words (some damaged) plus every UTF-16 code
+  point with no crash. With 500 personal words, the check at the end of a word takes 0.67 µs at worst, and 0.61 µs
+  per key inside a long word: a list of 500 words is no slower in use and takes no more memory (fixed arrays).
+- Earlier, under AddressSanitizer: 60 damaged word lists and 40 damaged settings files, no error reported.
+
+Not measured: typing in another app with Auto-fix on (test keys sent by a script are marked as injected, and the
+app ignores those), sleep and wake, lock and unlock, plugging and unplugging a monitor, and a run of several hours.

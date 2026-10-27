@@ -27,6 +27,10 @@ $words = Join-Path $dir "CursorLingo.words"
 $backup = Join-Path $env:TEMP ("CursorLingo-perf-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force -Path $backup | Out-Null
 foreach ($f in @($ini, $words)) { if (Test-Path $f) { Copy-Item $f $backup } }
+# Only one CursorLingo runs at a time, so another copy (say, the one you use every day) would make every launch here
+# quit at once. Ask for it to be closed rather than closing it.
+$others = @(Get-Process CursorLingo -ErrorAction SilentlyContinue | Where-Object { $_.Path -ne $Exe })
+if ($others.Count) { Write-Host ("Close the CursorLingo running from {0} first." -f $others[0].Path); exit 1 }
 $wasRunning = [bool](Get-Process CursorLingo -ErrorAction SilentlyContinue)
 
 Add-Type @"
@@ -40,7 +44,7 @@ public static class Pointer {
 "@
 
 function Stop-App {
-    Get-Process CursorLingo -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process CursorLingo -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe } | Stop-Process -Force
     Start-Sleep -Milliseconds 800
 }
 
@@ -73,7 +77,7 @@ function Measure-App([string]$name, [bool]$move) {
     }
     $p.Refresh()
     if ($p.HasExited) { Write-Host ("{0,-10} CRASHED while running (exit code {1})" -f $name, $p.ExitCode); return }
-    $cpu = ($p.TotalProcessorTime.TotalSeconds - $c0) / ((Get-Date) - $start).TotalSeconds / [Environment]::ProcessorCount * 100
+    $cpu = ($p.TotalProcessorTime.TotalSeconds - $c0) / ((Get-Date) - $start).TotalSeconds * 100  # of one core, as on macOS
     Write-Host ("{0,-10} cpu {1,5:N2} %   working set {2,5:N1} MB   private {3,5:N1} MB" -f $name, $cpu, ($p.WorkingSet64 / 1MB), ($p.PrivateMemorySize64 / 1MB))
 }
 
