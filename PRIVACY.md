@@ -33,7 +33,7 @@ Everything stays on your device:
 
 ## Links
 
-*Report a wrong fix or bug…*, *Star on GitHub* and *How to contribute* (in Settings) open CursorLingo's GitHub pages in your web browser, and *Buy a coffee on Ko-fi* opens its Ko-fi page. Nothing from the app is attached; what you do there is governed by GitHub's or Ko-fi's privacy policy. The PromptPay QR code is drawn on your computer, and *Copy number* only puts the number on your clipboard; the app is not part of any payment.
+*Report a wrong fix or bug…*, *Star on GitHub* and *How to contribute* (in Settings) open CursorLingo's GitHub pages in your web browser, and *Buy a coffee on Ko-fi* opens its Ko-fi page. Nothing from the app is attached; what you do there is governed by GitHub's or Ko-fi's privacy policy. The PromptPay QR code is drawn on your computer, and *Copy number* only puts the number on your clipboard; the app is not part of any payment. The Microsoft Store version has neither Ko-fi nor PromptPay.
 
 ## Children
 
@@ -80,7 +80,7 @@ Changes to this policy are published in this file, in the project's public histo
 
 ## ลิงก์
 
-ปุ่ม *แจ้งปัญหา…* *ให้ดาวบน GitHub* และ *วิธีร่วมพัฒนา* (ในหน้าตั้งค่า) จะเปิดหน้า GitHub ของ CursorLingo ในเว็บเบราว์เซอร์ ส่วน *เลี้ยงกาแฟผ่าน Ko-fi* จะเปิดหน้า Ko-fi โดยไม่แนบข้อมูลใดจากแอป สิ่งที่คุณทำบนเว็บเหล่านั้นอยู่ภายใต้นโยบายความเป็นส่วนตัวของ GitHub หรือ Ko-fi QR พร้อมเพย์สร้างขึ้นในเครื่องของคุณเอง และปุ่ม *คัดลอกเลข* แค่ใส่เลขลงคลิปบอร์ด แอปไม่ได้เกี่ยวข้องกับการโอนเงินใดๆ
+ปุ่ม *แจ้งปัญหา…* *ให้ดาวบน GitHub* และ *วิธีร่วมพัฒนา* (ในหน้าตั้งค่า) จะเปิดหน้า GitHub ของ CursorLingo ในเว็บเบราว์เซอร์ ส่วน *เลี้ยงกาแฟผ่าน Ko-fi* จะเปิดหน้า Ko-fi โดยไม่แนบข้อมูลใดจากแอป สิ่งที่คุณทำบนเว็บเหล่านั้นอยู่ภายใต้นโยบายความเป็นส่วนตัวของ GitHub หรือ Ko-fi QR พร้อมเพย์สร้างขึ้นในเครื่องของคุณเอง และปุ่ม *คัดลอกเลข* แค่ใส่เลขลงคลิปบอร์ด แอปไม่ได้เกี่ยวข้องกับการโอนเงินใดๆ ส่วนเวอร์ชันจาก Microsoft Store ไม่มีทั้ง Ko-fi และพร้อมเพย์
 
 ## เด็ก
 

@@ -2368,6 +2368,19 @@ static void BuildGeneralTab(Page& p) {
     p.Separator();
 
     p.Header(TR(L"Support CursorLingo", L"สนับสนุน CursorLingo"));
+    // The Store allows donations only through a purchase API (policy 10.8.2), so its build leaves out Ko-fi and
+    // PromptPay; they stay in the build from GitHub.
+    if (IsPackaged()) {
+        p.Caption(TR(L"CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub or a share "
+                     L"with friends means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
+                     L"CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ ฝากกดดาวบน GitHub "
+                     L"หรือแชร์ให้เพื่อนๆ ก็ได้นะ มีไอเดีย เจอคำที่แก้ผิด หรืออยากช่วยเขียนโค้ด ทักมาได้เลย"));
+        p.y += 10;
+        p.Add(L"BUTTON", TR(L"\u2605 Star on GitHub", L"\u2605 ให้ดาวบน GitHub"), WS_TABSTOP, Page::L, p.y, 150, 30, CTL_STAR);
+        p.Add(L"BUTTON", TR(L"How to contribute", L"วิธีร่วมพัฒนา"), WS_TABSTOP, Page::L + 160, p.y, 130, 30, CTL_CONTRIBUTE);
+        p.y += 30;
+        return;
+    }
     p.Caption(TR(L"CursorLingo is a free, spare-time project. If it saves you some retyping, a star on GitHub, a share with "
                  L"friends or a coffee means a lot. Got an idea, a word it got wrong, or some code? Come say hi.",
                  L"CursorLingo ทำในเวลาว่าง และแจกให้ใช้ฟรี ถ้ามันช่วยให้ไม่ต้องลบแล้วพิมพ์ใหม่บ่อยๆ ฝากกดดาวบน GitHub "
